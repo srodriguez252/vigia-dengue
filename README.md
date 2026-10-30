@@ -31,6 +31,20 @@ Downloads run on GitHub because Free Edition only allows outbound traffic to a s
 | `scripts/descargar_fuentes.py` | Downloads public sources into a local `landing/` folder |
 | `.github/workflows/descargar_fuentes.yml` | Weekly download and upload to the volume |
 
+## Outbound connectivity
+
+Databricks Free Edition only allows serverless compute reach a list of trusted domains. Since that list is not published, this script run on 2026-10-30 from `src/notebooks/00_probar_conectividad.py` checked if the services were avaliable:
+
+| Source | Host | DNS | HTTP |
+| --- | --- | --- | --- |
+| MSP · epidemiological bulletins | `www.salud.gob.ec` | resolves | 200 |
+| INEC · hospital discharges | `www.ecuadorencifras.gob.ec` | resolves | 200 |
+| Open-Meteo · weather archive | `archive-api.open-meteo.com` | resolves | 200 |
+| NOAA CPC · Niño index | `www.cpc.ncep.noaa.gov` | resolves | 200 |
+| PyPI · Python packages | `pypi.org` | resolves | 200 |
+
+All five sources are reachable from Databricks serverless compute as of this date.
+
 ## Run it yourself
 
 1. Run `src/setup/00_crear_catalogo.sql` in the Databricks SQL editor.
