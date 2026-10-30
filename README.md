@@ -55,6 +55,11 @@ All five sources are reachable from Databricks serverless compute as of this dat
    `databricks fs cp -r landing dbfs:/Volumes/vigia/bronze/landing --overwrite`.
 5. For the weekly run, add the repository secrets `DATABRICKS_HOST` and `DATABRICKS_TOKEN`.
 
+## Conectivity Table
+
+
+
+
 ## Data sources
 
 - NOAA Climate Prediction Center, weekly OISST v2.1 Niño indices, 1991–2020 base: <https://www.cpc.ncep.noaa.gov/data/indices/>
