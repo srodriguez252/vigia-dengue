@@ -1,0 +1,17 @@
+# Estado local de la CLI de Databricks
+.databricks/
+
+# Descargas locales: viven en el Volume, no en Git
+landing/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editores y sistema operativo
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

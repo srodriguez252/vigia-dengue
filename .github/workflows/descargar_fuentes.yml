@@ -1,0 +1,46 @@
+# Cada semana: descarga las fuentes y las sube al Volume de landing.
+# En Databricks, el Job vigia-semanal vigila ese Volume y corre el ETL pipeline apenas llega el archivo.
+name: Descargar fuentes
+
+on:
+  schedule:
+    # Martes 12:17 UTC = 07:17 en Ecuador.
+    - cron: "17 12 * * 2"
+  workflow_dispatch:
+
+concurrency:
+  group: descarga-semanal
+  cancel-in-progress: false
+
+jobs:
+  descargar-y-subir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CATALOGO: vigia
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - name: Revisar los secretos
+        run: |
+          if [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_TOKEN" ]; then
+            echo "::error::Faltan los secretos DATABRICKS_HOST y DATABRICKS_TOKEN del repositorio."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Descargar el índice Niño (NOAA CPC)
+        run: python scripts/descargar_fuentes.py --fuente nino --destino landing
+
+      - uses: databricks/setup-cli@v1.22.1
+
+      - name: Subir al Volume de landing
+        run: databricks fs cp -r landing "dbfs:/Volumes/${CATALOGO}/bronze/landing" --overwrite
+
+      - name: Confirmar lo que quedó en el Volume
+        run: databricks fs ls "dbfs:/Volumes/${CATALOGO}/bronze/landing/nino/"
