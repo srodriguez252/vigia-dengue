@@ -1,5 +1,5 @@
-# Silver - gacetas del MSP: la tabla de dengue por provincia de cada PDF
-# El parser corre dentro de mapInPandas; lo que no puede leer va a cuarentena
+# Silver - gacetas del MSP : la tabla de dengue por provincia de cada PDF
+# El parser corre dentro de mapInPandas; lo que no puede leer con confianza va a la cuarentena
 import collections
 import datetime as dt
 import io
@@ -13,7 +13,7 @@ import pdfplumber
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
-# Códigos DPA del INEC. Las claves van como las deja clave(): sin espacios, tildes ni puntos.
+# Códigos DPA del INEC. Las claves van como las deja clave(): sin espacios, tildes ni puntos
 PROVINCIAS = {
     "AZUAY": "01", "BOLIVAR": "02", "CANAR": "03", "CARCHI": "04", "COTOPAXI": "05", "CHIMBORAZO": "06",
     "ELORO": "07", "ESMERALDAS": "08", "GUAYAS": "09", "IMBABURA": "10", "LOJA": "11", "LOSRIOS": "12",
@@ -24,10 +24,10 @@ PROVINCIAS = {
 OTRAS_ENFERMEDADES = ("MALARIA", "PALUDISMO", "LEISHMANIASIS", "CHAGAS", "CHIKUNGUNYA", "ZIKA", "AMARILLA", "MAYARO")
 CLASIFICACION = {"DSSA", "DCSA", "DG"}
 NUMERO = re.compile(r"^(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?$")
-MILES_CON_COMA = re.compile(r"^\d{1,3}(?:,\d{3})+$")  #la coma como separador de miles
+MILES_CON_COMA = re.compile(r"^\d{1,3}(?:,\d{3})+$")  # la coma como separador de miles
 PEGADO = re.compile(r"^(.*\.\.)(\d[\d.,]*)$")  #nombre cortado y número sin espacio
 ETIQUETA_SE = re.compile(r"^(?:SE(?:\b|(?=\d)).*|\d{1,2})$")
-CONECTORES = {"-", "A", "AL", "HASTA"} 
+CONECTORES = {"-", "A", "AL", "HASTA"}
 ANIO = re.compile(r"^20\d{2}$")
 RANGO = re.compile(r"\d\s*(?:-|A|HASTA)\s*(?:LA\s+)?(?:SE\s*)?\d")
 SEMANA_PORTADA = re.compile(r"SEMANA EPIDEMIOLOGICA\s*\(SE\)\s*(\d{1,2})\s*(?:,|/|$)", re.MULTILINE)
@@ -57,7 +57,7 @@ def provincia(nombre):
     buscada = clave(nombre)
     if len(buscada) < 4:
         return None
-    if buscada.startswith("ZONA"):  #'ZONA NO DELIMITADA' y variantes
+    if buscada.startswith("ZONA"):  # «ZONA NO DELIMITADA» y variantes
         return "90"
     if buscada in PROVINCIAS:
         return PROVINCIAS[buscada]
@@ -73,7 +73,7 @@ def es_continuacion(codigo, nombre):
 
 
 def numero(texto):
-    """'punto de miles y coma decimal"""
+    """punto de miles y coma decimal."""
     if not NUMERO.match(texto):
         return None
     entero, _, decimales = texto.replace(".", "").partition(",")
@@ -81,11 +81,10 @@ def numero(texto):
 
 
 def palabras_de(pagina, tolerancia=3.0):
-    """Las palabras de una página con su posición, en mayúsculas y sin tildes.
+    """Las palabras de una página con su posición, en mayúsculas y sin tildes
 
-    tolerancia es cuánto pueden diferir en altura las letras que pdfplumber pone en una misma línea. Con los 3
-    puntos de siempre, los rótulos de un mapa a media altura pueden unir dos filas de la tabla, y sus letras se
-    intercalan: P R O V I N CIA. Por eso leer_pdf reintenta con 1 punto"""
+    tolerancia: cuánto pueden diferir en altura las letras de una línea. Con 3 puntos, un rótulo del mapa
+    puede unir dos filas y sus letras se intercalan (P R O V I N CIA); leer_pdf reintenta con 1."""
     palabras = []
     for w in pagina.extract_words(y_tolerance=tolerancia):
         texto = simple(w["text"])
@@ -116,14 +115,14 @@ def lineas_de(palabras, tolerancia=3.0):
 def etiquetas(palabras, separacion=6.0):
     """Junta las palabras pegadas del encabezado
 
-    Una palabra SE o TOTAL abre otra etiqueta aunque esté pegada a la anterior (SE 01-25 SE - 26, 2025),
+    Una palabra SE o «TOTAL abre otra etiqueta aunque esté pegada a la anterior (SE 01-25 SE - 26, 2025),
     salvo que la anterior termine en un conector de rango (SE 1 A SE 52)."""
     grupos = []
     for w in palabras:
         texto = w["texto"]
         abre = texto.startswith("TOTAL") or (texto.startswith("SE") and ETIQUETA_SE.match(texto))
         pegada = grupos and w["x0"] - grupos[-1]["x1"] <= separacion
-        anterior = grupos[-1]["texto"].split() if grupos else []  # puede venir vacía: «©» queda en ""
+        anterior = grupos[-1]["texto"].split() if grupos else []  # puede venir vacía, queda en ""
         tras_conector = bool(anterior) and anterior[-1] in CONECTORES
         if pegada and (not abre or tras_conector):
             grupos[-1]["texto"] += " " + texto
@@ -155,7 +154,7 @@ def corte_en(lineas):
 
 
 def grupos_de_clasificacion(textos):
-    """Cuántos grupos DCSA | DG | DSSA | Total seguidos tiene el encabezado, o 0 si no tiene esa forma"""
+    """Cuántos grupos «DCSA | DG | DSSA | Total» seguidos tiene el encabezado, o 0 si no tiene esa forma"""
     if not textos or len(textos) % 4:
         return 0
     for i in range(0, len(textos), 4):
@@ -165,11 +164,10 @@ def grupos_de_clasificacion(textos):
 
 
 def por_rotulo(cols, rotulos):
-    """A cada columna, la medida y el periodo del rótulo TASA» o «CASOS que tiene encima.
+    """A cada columna, la medida y el periodo del rótulo TASA o CASOS que tiene encima.
 
-    Los rótulos van en tres pares: de SE 1 a N-1, de la SE N y del total. Con 12 columnas de datos hay tres
-    debajo de cada rótulo. Si una clasificación no tuvo casos en la semana, su columna falta (SE 34 de 2026) y
-    cada columna toma el rótulo más cercano. Devuelve False si eso no deja los dos Total en el último par."""
+    Los rótulos van en tres pares: SE 1 a N-1, SE N y total; con 12 columnas de datos, tres por rótulo. Si falta
+    una (SE 34 de 2026), cada columna toma el rótulo más cercano. False si los Total no quedan en el último par"""
     datos = [c for c in cols if not c["texto"].startswith("TOTAL")]
     if len(datos) == 12:
         indices = [j // 3 for j in range(12)] + [4, 5]
@@ -215,7 +213,7 @@ def familia_de(cols, arriba):
 
 
 def total_de_arriba(cols, lineas_arriba, top):
-    """En 2026 el Total del encabezado queda una línea más arriba que las columnas SE: se suma como la última"""
+    """En 2026 el «Total» del encabezado queda una línea más arriba que las columnas SE: se suma como la última"""
     semanas = list(itertools.takewhile(lambda c: ETIQUETA_SE.match(c["texto"]), cols))
     if not semanas:
         return cols
@@ -234,7 +232,7 @@ def columnas_de(palabras):
     for c in etiquetas(palabras):
         if cols and cols[-1]["texto"].startswith("TOTAL"):
             # Lo que sigue a la derecha del último Total ya no es de la tabla, salvo otro Total u otro grupo
-            # DCSA | DG | DSSA | Total» (el año anterior y el actual, en la SE 1 de 2026).
+            # DCSA | DG | DSSA | Total (el año anterior y el actual, en la SE 1 de 2026).
             otro_grupo = c["texto"] in CLASIFICACION and grupos_de_clasificacion([x["texto"] for x in cols])
             if not (c["texto"].startswith("TOTAL") or otro_grupo):
                 break
@@ -262,8 +260,8 @@ def encabezados(palabras):
             cols = columnas_de(resto)
             if cols and not cols[-1]["texto"].startswith("TOTAL"):
                 cols = total_de_arriba(cols, lineas[:i], linea["top"])
-            # Los nombres empiezan donde empieza el encabezado (Inf. Provincia incluido); lo que quede más
-            # a la izquierda, como el recuadro de Galápagos del mapa, no es de la tabla
+            # Los nombres empiezan donde empieza el encabezado (Inf. Provincia» incluido); lo que quede más
+            # a la izquierda, como el recuadro de Galápagos del mapa, no es de la tabla.
             x0 = min([w["x0"] for w in ws[:k] if ancla["x0"] - w["x0"] <= 30] + [ancla["x0"]]) - 4
         else:
             cols = columnas_de([w for w in ws if not ANIO.match(w["texto"])])
@@ -276,7 +274,7 @@ def encabezados(palabras):
             continue
         x1 = cols[-1]["x1"] + 12
         # Las filas empiezan debajo del borde inferior del encabezado. La línea puede empezar más arriba,
-        # en un rótulo del mapa que quedó a la misma altura.
+        # en un rótulo del mapa que quedó a la misma altura
         fondo = max(w["bottom"] for w in ws if x0 <= w["x0"] and w["x1"] <= x1)
         cerca = lambda l: [w for w in l["palabras"] if x0 - 40 <= w["x0"] and w["x1"] <= x1 + 40]
         arriba = [{**l, "palabras": cerca(l)} for l in lineas[:i] if linea["top"] - 45 <= l["top"]]
@@ -299,10 +297,8 @@ def columna(w, cols):
 
 
 def sin_rotulos(recorte, desde):
-    """Quita las letras mucho más pequeñas que las de la tabla, como el rótulo GALAPAGOS del mapa.
-
-    En algunas gacetas de 2021 y 2022 ese rótulo cae sobre una fila y sus letras se intercalan con
-    el nombre: MORONA GSAALANPTAGIAOSGO. El tamaño de referencia sale de las primeras filas"""
+    """Quita las letras mucho más pequeñas que las de la tabla, como el rótulo GALAPAGOS del mapa, que en
+    2021 y 2022 cae sobre una fila: MORONA GSAALANPTAGIAOSGO. La referencia son las primeras filas"""
     tamanos = [c["size"] for c in recorte.chars if c["top"] < desde + 60 and c["text"].strip()]
     if not tamanos:
         return recorte
@@ -311,11 +307,10 @@ def sin_rotulos(recorte, desde):
 
 
 def filas_de(pagina, tabla, tolerancia=3.0):
-    """Las filas de la tabla, con el nombre a la izquierda y cada número en su columna, y dónde terminó.
+    """Las filas de la tabla, con el nombre a la izquierda y cada número en su columna, y dónde terminó
 
-    La página se recorta al ancho de la tabla, desde el borde inferior del encabezado, antes de leer
-    las palabras: así los rótulos del mapa de al lado no se mezclan con las filas. Cada fila guarda
-    también el texto de sus números, por si hay que leerlos con otro separador de miles"""
+    La página se recorta al ancho de la tabla, bajo el encabezado, para que el mapa de al lado no se mezcle.
+    Cada fila guarda también el texto de sus números, por si el separador de miles es otro"""
     cols = tabla["cols"]
     x0, _, x1, y1 = pagina.bbox
     recorte = pagina.within_bbox((max(tabla["x0"], x0), tabla["fondo"] + 0.5, min(tabla["x1"], x1), y1))
@@ -346,7 +341,7 @@ def filas_de(pagina, tabla, tolerancia=3.0):
         codigo = provincia(nombre) if nombre else None
         if not valores:
             if codigo:
-                # Una provincia sin números: puede que sus números vengan unos puntos más abajo
+                # Una provincia sin números: puede que sus números vengan unos puntos más abajo.
                 pendiente = {"nombre": nombre, "codigo": codigo, "top": linea["top"]}
             elif nombre and filas and es_continuacion(filas[-1]["codigo"], nombre):
                 pass  # el resto del nombre de la fila de arriba
@@ -379,38 +374,46 @@ def suma(valores, indices, decimales=None):
     return round(total, decimales) if decimales is not None else total
 
 
-def columna_de_la_semana(cols, semana):
-    """La columna SE de la semana de la gaceta: la que lleva su número o, si ninguna, la última.
+def semana_de(etiqueta):
+    """La semana de una etiqueta SE y si es un rango"""
+    texto = re.sub(r"/\s*\d{2,4}\.*", "", etiqueta)  # sin el año
+    numeros = re.findall(r"\d{1,2}", texto)
+    return (int(numeros[-1]) if numeros else None), bool(RANGO.search(texto))
 
-    En 2017 algunas tablas traen una semana más, con los casos que ya llegaron de la siguiente
-    («SE 01-07 | SE 08 | SE 09 | SE 10 | Total» en la gaceta de la SE 9): esos solo cuentan en el total"""
-    ultima = len(cols) - 2
-    for j in range(ultima, -1, -1):
-        texto = re.sub(r"/\s*\d{2,4}\.*", "", cols[j]["texto"])
-        numeros = re.findall(r"\d{1,2}", texto)
-        if numeros and not RANGO.search(texto) and int(numeros[-1]) == semana:
-            return j
-    return ultima
+
+def columnas_de_la_semana(cols, semana):
+    """La columna de la semana y las de lo previo: casi siempre, la última SE y todo lo de su izquierda.
+
+    El número de las etiquetas resuelve dos excepciones: una semana de más (SE 08 | SE 09 | SE 10 | Total
+    en la SE 9 de 2017) solo cuenta en el total, y la semana puede ir primero y sin SE, porque la tabla
+    dinámica ordena el número antes que el texto (46 | SE01-44 | SE45 | Total, SE 46 de 2019)"""
+    datos = range(len(cols) - 1)
+    semanas = [semana_de(cols[j]["texto"]) for j in datos]
+    con_su_numero = [j for j in datos if semana and semanas[j] == (semana, False)]
+    if not con_su_numero:
+        return len(cols) - 2, range(len(cols) - 2)
+    k = con_su_numero[-1]
+    return k, [j for j in datos if j != k and (semanas[j][1] or (semanas[j][0] or 0) <= semana)]
 
 
 def interpretar(familia, cols, valores, semana):
-    """Casos (o tasas) previos, de la semana y acumulados de una fila, según el formato de la tabla
+    """Casos (o tasas) previos, de la semana y acumulados de una fila, según el formato de la tabla.
 
-    Una celda vacía es un cero: AZUAY 17 17 quiere decir 17 previos, ninguno en la semana, 17 en total"""
+    Una celda vacía es un cero: AZUAY 17 17 quiere decir 17 previos, ninguno en la semana, 17 en total."""
     n = len(cols)
     r = dict.fromkeys(["casos_previos", "casos_semana", "casos_acumulados",
                        "tasa_previa", "tasa_semana", "tasa_acumulada"])
     if familia == "semanal":
-        # La columna de la semana de la gaceta (casi siempre la última SE); las anteriores suman lo previo
+        # La columna de la semana de la gaceta (casi siempre la última SE); las otras suman lo previo
         r["casos_acumulados"] = valores.get(n - 1)
         if n >= 3:
-            k = columna_de_la_semana(cols, semana)
+            k, previas = columnas_de_la_semana(cols, semana)
             r["casos_semana"] = valores.get(k, 0)
-            r["casos_previos"] = suma(valores, range(k))
+            r["casos_previos"] = suma(valores, previas)
         elif semana == 1:  # la gaceta de la SE 1 trae una sola columna
             r["casos_semana"], r["casos_previos"] = r["casos_acumulados"], 0
     elif familia == "tasas":
-        # Las columnas 'SE 1 - 45' son lo previo; las 'SE 46', la semana (una por clasificación)
+        # Las columnas 'SE 1 - 45' son lo previo; las 'SE 46', la semana (una por clasificación).
         rangos = [j for j in range(n - 1) if RANGO.search(cols[j]["texto"])]
         r["tasa_previa"] = suma(valores, rangos, 2)
         r["tasa_semana"] = suma(valores, [j for j in range(n - 1) if j not in rangos], 2)
@@ -422,7 +425,7 @@ def interpretar(familia, cols, valores, semana):
         if semana == 1 and r[acumulado] is not None:
             r[de_la_semana], r[previo] = r[acumulado], 0
     else:
-        # clasificacion y mixta: cada columna ya sabe su medida (casos o tasa) y su periodo (previo, semana, total)
+        # clasificacion y mixta: cada columna ya sabe su medida (casos o tasa) y su periodo (previo, semana, total).
         for medida, campos in CAMPOS.items():
             for periodo, campo in zip(PERIODOS, campos):
                 js = [j for j, c in enumerate(cols) if c.get("medida") == medida and c["periodo"] == periodo]
@@ -434,8 +437,8 @@ def interpretar(familia, cols, valores, semana):
 
 
 def coma_de_miles(filas):
-    """¿La coma separa miles en esta tabla? (3,098 en la SE 17 de 2025.) Solo si ningún número lleva punto,
-    todos los que llevan coma tienen grupos de tres cifras y, leídos así, las provincias suman la fila Total."""
+    """¿La coma separa miles en esta tabla? («3,098» en la SE 17 de 2025.) Solo si ningún número lleva punto,
+    todos los que llevan coma tienen grupos de tres cifras y, leídos así, las provincias suman la fila Total"""
     textos = [t for f in filas for t in f["textos"].values()]
     con_coma = [t for t in textos if "," in t]
     if not con_coma or any("." in t for t in textos) or not all(MILES_CON_COMA.match(t) for t in con_coma):
@@ -449,9 +452,8 @@ def coma_de_miles(filas):
 
 
 def elegir_semana(portada, titulo, titulo_portada, columna_se, enlace):
-    """La semana de la gaceta. Manda la portada nueva (2025-2026). Si no está, votan el título de la página
-    de dengue, la portada vieja, la última columna SE de la tabla y el enlace de la página del MSP; en un
-    empate gana la columna, que es parte de la tabla."""
+    """La semana de la gaceta. Manda la portada nueva (2025-2026); si no está, votan el título de la tabla,
+    la portada vieja, la columna SE más alta y el enlace del MSP. En un empate gana la columna"""
     if portada:
         return portada
     votos = collections.Counter(s for s in (titulo, titulo_portada, columna_se, enlace) if s)
@@ -462,9 +464,9 @@ def elegir_semana(portada, titulo, titulo_portada, columna_se, enlace):
 
 
 def leer_gaceta(contenido, se_enlace=None, tolerancia=3.0):
-    """Lee un PDF y devuelve su semana, su corte y las filas de la tabla, o levanta Cuarentena.
+    """Lee un PDF y devuelve su semana, su corte y las filas de la tabla, o levanta Cuarentena
 
-    se_enlace es la semana que decía la página del MSP: solo pesa cuando el PDF se contradice."""
+    se_enlace es la semana que decía la página del MSP: solo pesa cuando el PDF se contradice"""
     with pdfplumber.open(io.BytesIO(contenido)) as pdf:
         portada = titulo_portada = corte = reserva = None
         caracteres = 0
@@ -532,13 +534,13 @@ def leer_tabla(pagina, tabla, contexto):
     if con_casos and fin != "la fila Total":
         raise Cuarentena(f"la tabla terminó antes de la fila Total, en {fin}")
     se = [c["texto"] for c in cols if ETIQUETA_SE.match(c["texto"])]
-    numeros = re.findall(r"\d{1,2}", re.sub(r"/\s*\d{4}", "", se[-1])) if se else []
-    columna_se = int(numeros[-1]) if numeros else None
+    numeros = [s for s, _ in map(semana_de, se) if s]
+    columna_se = max(numeros) if numeros else None
     titulo = next((semana_en(t) for t in tabla["titulos"] if semana_en(t)), None)
     portada, titulo_portada, se_enlace = contexto["semanas"]
     return {
         "semana": elegir_semana(portada, titulo, titulo_portada, columna_se, se_enlace),
-        # Con dos o más columnas SE, la última es la semana: sirve para verificar la elegida.
+        # Con dos o más columnas SE, la más alta es la semana: sirve para verificar la elegida.
         "semana_columna": columna_se if familia == "semanal" and len(se) >= 2 else None,
         "corte": contexto["corte"], "familia": familia, "pagina": contexto["pagina"],
         "cols": cols, "filas": filas,
@@ -568,10 +570,8 @@ def filas_de_gaceta(contenido, se_enlace, tolerancia):
 
 
 def leer_pdf(pdf):
-    """Una gaceta -> sus filas, o una sola fila con el motivo de la cuarentena.
-
-    Si la primera lectura va a cuarentena, se intenta otra con 1 punto de tolerancia vertical (palabras_de).
-    Una gaceta que ya se leía bien no cambia: el segundo intento solo corre cuando el primero falla"""
+    """Una gaceta → sus filas, o una sola fila con el motivo de la cuarentena. Si la primera lectura va a
+    cuarentena, se intenta otra con 1 punto de tolerancia vertical (palabras_de)."""
     base = {"anio": int(pdf.anio), "archivo": pdf.archivo, "sha256": pdf.sha256,
             "se_archivo": None if pd.isna(pdf.se_archivo) else int(pdf.se_archivo)}
     try:
@@ -587,12 +587,12 @@ def leer_pdf(pdf):
         return [{**base, **fila} for fila in filas]
     except Cuarentena as motivo:
         return [{**base, "motivo": str(motivo)}]
-    except Exception as error:  # un PDF dañado no detiene el pipeline
+    except Exception as error:  # un PDF dañado no debe detener el pipeline
         return [{**base, "motivo": f"error del parser: {type(error).__name__}: {error}"[:300]}]
 
 
 def leer_lote(lotes):
-    """Para mapInPandas: recibe lotes de PDF y devuelve, por cada uno, las filas que se leyeron"""
+    """Para mapInPandas: recibe lotes de PDF y devuelve, por cada uno, las filas que se leyeron."""
     for lote in lotes:
         filas = [fila for pdf in lote.itertuples(index=False) for fila in leer_pdf(pdf)]
         yield pd.DataFrame(filas, columns=COLUMNAS, dtype=object)
