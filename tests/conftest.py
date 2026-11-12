@@ -9,8 +9,10 @@ import sys
 import pytest
 from pyspark.sql import SparkSession
 
+RAIZ = pathlib.Path(__file__).resolve().parents[1]
 CARPETA_DEL_PIPELINE = "vigia-etl"   # la que tiene transformations/ y utilities/
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / CARPETA_DEL_PIPELINE))
+sys.path.insert(0, str(RAIZ / CARPETA_DEL_PIPELINE))
+sys.path.insert(0, str(RAIZ / "src"))
 
 
 @pytest.fixture(scope="session")
