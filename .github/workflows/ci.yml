@@ -1,11 +1,11 @@
-# CI: corre las pruebas de tests/ en cada cambio del pipeline, del modelo o de las pruebas
+# CI: corre las pruebas de tests/ en cada cambio y, si pasan en main, despliega el bundle (pipeline, Job y dashboard)
 name: CI
 
 on:
   push:
-    paths: ["vigia-etl/**", "src/modelos/**", "tests/**", ".github/workflows/ci.yml"]
+    paths: ["vigia-etl/**", "src/**", "tests/**", "resources/**", "databricks.yml", ".github/workflows/ci.yml"]
   pull_request:
-    paths: ["vigia-etl/**", "src/modelos/**", "tests/**", ".github/workflows/ci.yml"]
+    paths: ["vigia-etl/**", "src/**", "tests/**", "resources/**", "databricks.yml", ".github/workflows/ci.yml"]
   workflow_dispatch:
 
 jobs:
@@ -27,3 +27,27 @@ jobs:
         run: pip install pyspark==4.0.1 pytest==8.4.2 scikit-learn==1.7.2 pandas==2.3.3 numpy==2.3.4 matplotlib==3.10.6
       - name: Corre las pruebas
         run: pytest -v tests
+
+  desplegar:
+    # Solo en main y solo si las pruebas pasaron. Un despliegue a la vez: el segundo espera al primero
+    needs: pruebas
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: desplegar-bundle
+      cancel-in-progress: false
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      # La CLI más reciente: el estado que dejó tu CLI al atar los recursos no puede ser más nuevo que el de CI
+      - uses: databricks/setup-cli@main
+      - name: Valida el bundle
+        run: databricks bundle validate -t prod
+      - name: Muestra lo que va a cambiar
+        run: databricks bundle plan -t prod
+      - name: Despliega
+        # Sin --auto-approve, a propósito: si el plan borra o recrea algo, el despliegue falla en vez de hacerlo
+        run: databricks bundle deploy -t prod
