@@ -20,6 +20,7 @@ DESDE, HASTA = dt.date(2015, 1, 4), dt.date(2023, 12, 30)   # de la SE 1 de 2015
 FALTAN = {("09", 2018, 10), ("13", 2018, 10), ("09", 2020, 20), ("09", 2020, 21), ("13", 2022, 30)}
 CORREGIDA = ("09", 2021, 30)   # su versión 2 sale 14 días después, con 10 casos más
 BAJA = ("13", 2017, 20)        # su acumulado sale 3 casos por debajo del de la semana anterior
+CON_EL_ANIO_ANTERIOR = 2022    # su gaceta de la SE 1 suma el acumulado de 2021, como la de la SE 1 de 2025
 
 
 def semana_epi(fecha):
@@ -52,7 +53,7 @@ def construir_datos(spark):
     semanas = todas_las_semanas()
     fin_de = {(a, s): fin for a, s, _, fin in semanas}
     publicada = fin_de[CORREGIDA[1:]] + dt.timedelta(days=14)
-    gacetas, acumulado = [], {}
+    gacetas, acumulado, ultimo = [], {}, {}
     for anio, semana, _, fin in semanas:
         if anio < 2016:
             continue
@@ -66,7 +67,10 @@ def construir_datos(spark):
             reportado = int(previo) - 3 if (provincia, anio, semana) == BAJA else int(acumulado[clave])
             # Después de la corrección, las gacetas siguientes ya traen los 10 casos de más
             extra = 10 if clave == CORREGIDA[:2] and corte >= publicada else 0
+            if anio == CON_EL_ANIO_ANTERIOR and semana == 1:
+                extra = ultimo[(provincia, anio - 1)]   # el Total suma el año anterior y la SE 1
             gacetas.append((provincia, anio, semana, 1, corte, reportado + extra))
+            ultimo[clave] = reportado + extra
     original = next(g for g in gacetas if g[:3] == CORREGIDA)
     gacetas.append((*CORREGIDA, 2, publicada, original[5] + 10))
     clima, nino, poblacion = [], [], []
@@ -168,6 +172,18 @@ def test_las_semanas_sin_gaceta_se_reparten(resultado):
     assert [fila[s].imputado for s in (19, 20, 21, 22, 23)] == [False, True, True, True, False]
     assert [fila[s].casos for s in (20, 21, 22)] == [reparto] * 3
     assert fila[23].casos == casos_reales("09", 2020, 23)
+
+
+def test_una_gaceta_que_trae_el_anio_anterior_no_cuenta(resultado):
+    finales, _, tabla = resultado
+    fila = {r.semana_epi: r for r in
+            finales.where(f"dpa_provin = '13' AND anio_epi = {CON_EL_ANIO_ANTERIOR} AND semana_epi <= 3").collect()}
+    reparto = round(sum(casos_reales("13", CON_EL_ANIO_ANTERIOR, s) for s in (1, 2)) / 2, 2)
+    assert [fila[s].imputado for s in (1, 2, 3)] == [True, True, False]
+    assert [fila[s].casos for s in (1, 2)] == [reparto] * 2
+    # Al emitir la SE 1, su única gaceta es la que trae el año anterior: esa semana queda sin dato
+    emitida = tabla.where(f"dpa_provin = '13' AND anio_epi = {CON_EL_ANIO_ANTERIOR} AND semana_epi = 1").first()
+    assert emitida.casos_lag0 is None
 
 
 def test_un_acumulado_que_baja_no_resta(resultado):

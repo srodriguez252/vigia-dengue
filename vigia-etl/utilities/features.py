@@ -23,6 +23,8 @@ ANIOS_CANAL = 7               # años previos que resume el canal endémico
 MIN_ANIOS_CANAL = 5           # con menos años sin epidemia, no hay canal
 MIN_SEMANAS_ANIO = 40         # un año entra al canal si tiene al menos estas semanas con dato
 REZAGOS_NINO = (0, 4, 8, 12)
+SEMANAS_INICIO = 4            # una gaceta de las primeras semanas del año...
+FRACCION_CIERRE = 0.5         # ...con al menos esta parte del acumulado del año anterior trae ese año
 
 
 def semanas(calendario):
@@ -32,12 +34,30 @@ def semanas(calendario):
 
 
 def gacetas(dengue_casos, semanas_df):
-    """Una fila por gaceta, versión y provincia, con el acumulado del año hasta la semana de la gaceta"""
-    return (dengue_casos
-            .where(F.col("provincia").isin(PROVINCIAS) & F.col("casos_acumulados").isNotNull())
-            .groupBy(F.col("provincia").alias("dpa_provin"), F.col("anio").alias("anio_epi"), "semana_epi",
-                     "version", "fecha_corte")
-            .agg(F.max("casos_acumulados").cast("double").alias("acumulado"))
+    """Una fila por gaceta, versión y provincia, con el acumulado del año hasta la semana de la gaceta
+
+    Descarta la gaceta de las primeras SEMANAS_INICIO semanas del año cuyo acumulado del país llega a FRACCION_CIERRE
+    del acumulado más alto del año anterior que se conocía a su fecha de corte: trae los casos de ese año. La de la
+    SE 1 de 2025 suma en su Total los 61 352 casos de 2024 y los 547 de su semana. Su semana queda como un hueco,
+    que se reparte con la gaceta siguiente
+    """
+    por_provincia = (dengue_casos
+                     .where(F.col("provincia").isin(PROVINCIAS) & F.col("casos_acumulados").isNotNull())
+                     .groupBy(F.col("provincia").alias("dpa_provin"), F.col("anio").alias("anio_epi"), "semana_epi",
+                              "version", "fecha_corte")
+                     .agg(F.max("casos_acumulados").cast("double").alias("acumulado")))
+    gaceta = ["anio_epi", "semana_epi", "version", "fecha_corte"]
+    pais = por_provincia.groupBy(*gaceta).agg(F.sum("acumulado").alias("pais"))
+    anio_anterior = pais.select((F.col("anio_epi") + 1).alias("anio_siguiente"),
+                                F.col("fecha_corte").alias("corte_anterior"), F.col("pais").alias("pais_anterior"))
+    con_el_anio_anterior = (pais.where(F.col("semana_epi") <= SEMANAS_INICIO)
+                            .join(anio_anterior, (F.col("anio_epi") == F.col("anio_siguiente"))
+                                  & (F.col("corte_anterior") <= F.col("fecha_corte")))
+                            .groupBy(*gaceta, "pais").agg(F.max("pais_anterior").alias("maximo_anterior"))
+                            .where(F.col("pais") >= FRACCION_CIERRE * F.col("maximo_anterior"))
+                            .select(*gaceta))
+    misma_gaceta = [F.col(f"p.{c}").eqNullSafe(F.col(f"q.{c}")) for c in gaceta]
+    return (por_provincia.alias("p").join(con_el_anio_anterior.alias("q"), misma_gaceta, "left_anti")
             .join(semanas_df.select("anio_epi", "semana_epi", "inicio_semana"), ["anio_epi", "semana_epi"])
             .select("dpa_provin", "anio_epi", F.col("semana_epi").alias("gaceta_semana"),
                     F.col("inicio_semana").alias("inicio_gaceta"), "version", "fecha_corte", "acumulado"))
