@@ -1,0 +1,11 @@
+resources:
+  dashboards:
+    vigia_dengue:
+      display_name: "Vigía Dengue · boletín semanal"
+      warehouse_id: 8d9a7d3846d51d7c
+      file_path: ../src/dashboards/vigia_dengue.lvdash.json
+      # La carpeta donde ya está el dashboard: sin esta línea, el despliegue lo recrearía en .bundle,
+      # con otro ID y otra URL
+      parent_path: /Workspace/Users/${workspace.current_user.userName}
+      lifecycle:
+        prevent_destroy: true

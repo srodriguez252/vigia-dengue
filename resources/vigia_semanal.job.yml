@@ -1,0 +1,130 @@
+resources:
+  jobs:
+    vigia_semanal:
+      name: vigia-semanal
+      tasks:
+        - task_key: Clima
+          disable_auto_optimization: false
+          disabled: false
+          email_notifications:
+            on_failure:
+              - ${workspace.current_user.userName}
+          max_retries: 2
+          min_retry_interval_millis: 600000
+          notebook_task:
+            notebook_path: ../src/notebooks/descargar_clima.ipynb
+            source: WORKSPACE
+          notification_settings:
+            alert_on_last_attempt: false
+            no_alert_for_canceled_runs: false
+            no_alert_for_skipped_runs: false
+          retry_on_timeout: false
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+          webhook_notifications: {}
+        - task_key: Gacetas
+          disable_auto_optimization: false
+          disabled: false
+          email_notifications:
+            on_failure:
+              - ${workspace.current_user.userName}
+          max_retries: 2
+          min_retry_interval_millis: 600000
+          notebook_task:
+            notebook_path: ../src/notebooks/descargar_gacetas.ipynb
+            source: WORKSPACE
+          notification_settings:
+            alert_on_last_attempt: false
+            no_alert_for_canceled_runs: false
+            no_alert_for_skipped_runs: false
+          retry_on_timeout: false
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+          webhook_notifications: {}
+        - task_key: ETL
+          depends_on:
+            - task_key: Gacetas
+            - task_key: Clima
+          disabled: false
+          email_notifications: {}
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.vigia_etl.id}
+          run_if: ALL_DONE
+          timeout_seconds: 0
+          webhook_notifications: {}
+        - task_key: Pronostico
+          depends_on:
+            - task_key: ETL
+          disable_auto_optimization: false
+          disabled: false
+          email_notifications: {}
+          max_retries: 0
+          min_retry_interval_millis: 600000
+          notebook_task:
+            notebook_path: ../src/notebooks/pronostico_semanal.ipynb
+            source: WORKSPACE
+          notification_settings:
+            alert_on_last_attempt: false
+            no_alert_for_canceled_runs: false
+            no_alert_for_skipped_runs: false
+          retry_on_timeout: false
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+          webhook_notifications: {}
+        - task_key: Alerta
+          depends_on:
+            - task_key: Pronostico
+          disable_auto_optimization: false
+          disabled: false
+          email_notifications: {}
+          max_retries: 0
+          min_retry_interval_millis: 600000
+          notebook_task:
+            notebook_path: ../src/notebooks/alerta_semanal.ipynb
+            source: WORKSPACE
+          notification_settings:
+            alert_on_last_attempt: false
+            no_alert_for_canceled_runs: false
+            no_alert_for_skipped_runs: false
+          retry_on_timeout: false
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+          webhook_notifications: {}
+        - task_key: Boletin
+          depends_on:
+            - task_key: Alerta
+          dashboard_task:
+            dashboard_id: ${resources.dashboards.vigia_dengue.id}
+            subscription:
+              attachment:
+                page_attachment: {}
+              subscribers:
+                - user_name: ${workspace.current_user.userName}
+            warehouse_id: 8d9a7d3846d51d7c
+          disabled: false
+          email_notifications: {}
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+          webhook_notifications: {}
+      parameters:
+        - name: semanas
+          default: "8"
+      email_notifications:
+        no_alert_for_skipped_runs: false
+        on_failure:
+          - ${workspace.current_user.userName}
+      max_concurrent_runs: 1
+      notification_settings:
+        no_alert_for_canceled_runs: false
+        no_alert_for_skipped_runs: false
+      performance_target: PERFORMANCE_OPTIMIZED
+      queue:
+        enabled: true
+      schedule:
+        pause_status: UNPAUSED
+        quartz_cron_expression: 0 0 8 ? * Sat
+        timezone_id: America/Guayaquil
+      timeout_seconds: 0
+      webhook_notifications: {}
+      lifecycle:   # un despliegue no puede borrar ni recrear el Job
+        prevent_destroy: true

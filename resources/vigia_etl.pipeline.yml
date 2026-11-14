@@ -1,0 +1,19 @@
+resources:
+  pipelines:
+    vigia_etl:
+      name: vigia-etl
+      libraries:
+        - glob:
+            include: ../vigia-etl/transformations/**
+      catalog: vigia
+      channel: CURRENT
+      continuous: false
+      environment:
+        dependencies:
+          - pdfplumber==0.11.7
+      photon: true
+      root_path: ../vigia-etl
+      schema: bronze
+      serverless: true
+      lifecycle:   # borrar o recrear el pipeline borraría sus tablas
+        prevent_destroy: true

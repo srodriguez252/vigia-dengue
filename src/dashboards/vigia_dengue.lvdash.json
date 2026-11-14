@@ -1,0 +1,831 @@
+{
+  "datasets": [
+    {
+      "displayName": "Boletín de la última emisión",
+      "name": "ds_boletin",
+      "queryLines": [
+        "WITH ultima AS (\n",
+        "  SELECT max(emision) AS emision FROM vigia.gold.alertas\n",
+        "),\n",
+        "boletin AS (\n",
+        "  SELECT a.*, CASE a.nivel WHEN 'roja' THEN 'Roja' WHEN 'amarilla' THEN 'Amarilla' WHEN 'verde' THEN 'Verde' ELSE 'Sin canal' END AS alerta,\n",
+        "         CASE a.nivel WHEN 'roja' THEN 1 WHEN 'amarilla' THEN 2 WHEN 'verde' THEN 3 ELSE 4 END AS orden\n",
+        "  FROM vigia.gold.alertas a\n",
+        "  JOIN ultima u ON a.emision = u.emision\n",
+        ")\n",
+        "SELECT b.provincia, b.dpa_provin, b.emision, b.anio_epi, b.semana_epi, b.fecha_emision, b.alerta, b.orden,\n",
+        "       concat('<span style=\"background-color:',\n",
+        "              CASE b.alerta WHEN 'Roja' THEN '#d03b3b' WHEN 'Amarilla' THEN '#fab219'\n",
+        "                            WHEN 'Verde' THEN '#0ca30c' ELSE '#8a8a85' END,\n",
+        "              ';color:', CASE b.alerta WHEN 'Amarilla' THEN '#0b0b0b' ELSE '#ffffff' END,\n",
+        "              ';padding:2px 10px;border-radius:10px;font-weight:600\">', b.alerta, '</span>') AS etiqueta,\n",
+        "       b.motivo, b.casos_semana, b.casos_4s, b.camas_dia_4s, b.camas_promedio,\n",
+        "       g.latitud, g.longitud\n",
+        "FROM boletin b\n",
+        "LEFT JOIN vigia.gold.dim_geografia g ON g.dpa_canton = concat(b.dpa_provin, '01')\n",
+        "ORDER BY b.orden, b.casos_4s DESC\n"
+      ]
+    },
+    {
+      "displayName": "Resumen de la última emisión",
+      "name": "ds_resumen",
+      "queryLines": [
+        "WITH ultima AS (\n",
+        "  SELECT max(emision) AS emision FROM vigia.gold.alertas\n",
+        ")\n",
+        "SELECT max(a.anio_epi) AS anio_epi, max(a.semana_epi) AS semana_epi, max(a.fecha_emision) AS fecha_emision,\n",
+        "       count_if(a.nivel = 'roja') AS rojas, count_if(a.nivel = 'amarilla') AS amarillas,\n",
+        "       round(sum(a.casos_4s)) AS casos_4s, round(sum(a.camas_promedio), 1) AS camas_promedio\n",
+        "FROM vigia.gold.alertas a\n",
+        "JOIN ultima u ON a.emision = u.emision\n"
+      ]
+    },
+    {
+      "displayName": "Casos, pronóstico y canal por provincia",
+      "name": "ds_serie",
+      "queryLines": [
+        "WITH ultima AS (\n",
+        "  SELECT max(emision) AS emision FROM vigia.gold.pronosticos\n",
+        "),\n",
+        "pasado AS (\n",
+        "  SELECT d.provincia, d.inicio_semana AS semana, d.casos,\n",
+        "         CASE WHEN d.inicio_semana = u.emision THEN d.casos END AS pronostico,\n",
+        "         CASE WHEN d.inicio_semana = u.emision THEN d.casos END AS pronostico_bajo,\n",
+        "         CASE WHEN d.inicio_semana = u.emision THEN d.casos END AS pronostico_alto,\n",
+        "         CASE WHEN c.q3 IS NOT NULL THEN greatest(c.q3, 5) END AS umbral_epidemico,\n",
+        "         CASE WHEN c.mediana IS NOT NULL THEN greatest(c.mediana, 5) END AS umbral_alerta\n",
+        "  FROM vigia.gold.dengue_semana d\n",
+        "  CROSS JOIN ultima u\n",
+        "  LEFT JOIN vigia.gold.canal_endemico c\n",
+        "    ON c.dpa_provin = d.dpa_provin AND c.anio_epi = d.anio_epi AND c.semana_epi = d.semana_epi\n",
+        "  WHERE d.inicio_semana > date_sub(u.emision, 182) AND d.inicio_semana <= u.emision\n",
+        "),\n",
+        "futuro AS (\n",
+        "  SELECT p.provincia, p.objetivo AS semana, CAST(NULL AS DOUBLE) AS casos,\n",
+        "         p.pronostico, p.pronostico_bajo, p.pronostico_alto,\n",
+        "         CASE WHEN p.canal_q3 IS NOT NULL THEN greatest(p.canal_q3, 5) END AS umbral_epidemico,\n",
+        "         CASE WHEN p.canal_mediana IS NOT NULL THEN greatest(p.canal_mediana, 5) END AS umbral_alerta\n",
+        "  FROM vigia.gold.pronosticos p\n",
+        "  JOIN ultima u ON p.emision = u.emision\n",
+        "),\n",
+        "ancho AS (\n",
+        "  SELECT * FROM pasado\n",
+        "  UNION ALL\n",
+        "  SELECT * FROM futuro\n",
+        ")\n",
+        "SELECT a.provincia, a.semana, s.serie, round(s.valor, 1) AS casos\n",
+        "FROM ancho a\n",
+        "LATERAL VIEW stack(6, 'Casos', a.casos, 'Pronóstico', a.pronostico,\n",
+        "                   'Límite bajo (80 %)', a.pronostico_bajo, 'Límite alto (80 %)', a.pronostico_alto,\n",
+        "                   'Umbral epidémico', a.umbral_epidemico, 'Umbral de alerta', a.umbral_alerta) s AS serie, valor\n",
+        "WHERE s.valor IS NOT NULL\n"
+      ]
+    },
+    {
+      "displayName": "Niveles de las últimas 12 emisiones",
+      "name": "ds_historial",
+      "queryLines": [
+        "WITH emisiones AS (\n",
+        "  SELECT DISTINCT emision FROM vigia.gold.alertas ORDER BY emision DESC LIMIT 12\n",
+        "),\n",
+        "niveles AS (\n",
+        "  SELECT a.emision, CASE a.nivel WHEN 'roja' THEN 'Roja' WHEN 'amarilla' THEN 'Amarilla' WHEN 'verde' THEN 'Verde' ELSE 'Sin canal' END AS alerta\n",
+        "  FROM vigia.gold.alertas a\n",
+        "  JOIN emisiones e ON a.emision = e.emision\n",
+        ")\n",
+        "SELECT emision, alerta, count(*) AS provincias\n",
+        "FROM niveles\n",
+        "GROUP BY emision, alerta\n",
+        "ORDER BY emision\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "displayName": "Boletín",
+      "layout": [
+        {
+          "position": {
+            "height": 2,
+            "width": 12,
+            "x": 0,
+            "y": 0
+          },
+          "widget": {
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Vigía Dengue · alerta semanal de dengue en Ecuador\n",
+                "\n",
+                "Pronóstico de casos a 1-4 semanas por provincia y alerta según el canal endémico. Se actualiza cada sábado con el Job vigia-semanal.\n"
+              ]
+            },
+            "name": "encabezado"
+          }
+        },
+        {
+          "position": {
+            "height": 3,
+            "width": 3,
+            "x": 0,
+            "y": 2
+          },
+          "widget": {
+            "name": "semana",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_resumen",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "expression": "`semana_epi`",
+                      "name": "semana_epi"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "value": {
+                  "displayName": "Semana emitida",
+                  "fieldName": "semana_epi",
+                  "format": {
+                    "decimalPlaces": {
+                      "places": 0,
+                      "type": "max"
+                    },
+                    "type": "number-plain"
+                  },
+                  "formatTemplate": "SE {{ @formatted }}"
+                }
+              },
+              "frame": {
+                "description": "Semana epidemiológica del último boletín (domingo a sábado)",
+                "showDescription": true,
+                "showTitle": true,
+                "title": "Semana emitida"
+              },
+              "version": 2,
+              "widgetType": "counter"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 3,
+            "width": 3,
+            "x": 3,
+            "y": 2
+          },
+          "widget": {
+            "name": "rojas",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_resumen",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "expression": "`rojas`",
+                      "name": "rojas"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "value": {
+                  "displayName": "Provincias en roja",
+                  "fieldName": "rojas",
+                  "format": {
+                    "decimalPlaces": {
+                      "places": 0,
+                      "type": "max"
+                    },
+                    "type": "number-plain"
+                  }
+                }
+              },
+              "frame": {
+                "description": "Dos emisiones seguidas con pronóstico en zona epidémica",
+                "showDescription": true,
+                "showTitle": true,
+                "title": "Provincias en roja"
+              },
+              "version": 2,
+              "widgetType": "counter"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 3,
+            "width": 3,
+            "x": 6,
+            "y": 2
+          },
+          "widget": {
+            "name": "amarillas",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_resumen",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "expression": "`amarillas`",
+                      "name": "amarillas"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "value": {
+                  "displayName": "Provincias en amarilla",
+                  "fieldName": "amarillas",
+                  "format": {
+                    "decimalPlaces": {
+                      "places": 0,
+                      "type": "max"
+                    },
+                    "type": "number-plain"
+                  }
+                }
+              },
+              "frame": {
+                "description": "Pronóstico sobre la mediana del canal",
+                "showDescription": true,
+                "showTitle": true,
+                "title": "Provincias en amarilla"
+              },
+              "version": 2,
+              "widgetType": "counter"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 3,
+            "width": 3,
+            "x": 9,
+            "y": 2
+          },
+          "widget": {
+            "name": "camas",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_resumen",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "expression": "`camas_promedio`",
+                      "name": "camas_promedio"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "value": {
+                  "displayName": "Camas ocupadas por dengue",
+                  "fieldName": "camas_promedio",
+                  "format": {
+                    "decimalPlaces": {
+                      "places": 1,
+                      "type": "max"
+                    },
+                    "type": "number-plain"
+                  }
+                }
+              },
+              "frame": {
+                "description": "Promedio diario de las próximas 4 semanas en todo el país; es un orden de magnitud",
+                "showDescription": true,
+                "showTitle": true,
+                "title": "Camas ocupadas por dengue"
+              },
+              "version": 2,
+              "widgetType": "counter"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 10,
+            "width": 5,
+            "x": 0,
+            "y": 5
+          },
+          "widget": {
+            "name": "mapa",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_boletin",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "expression": "`alerta`",
+                      "name": "alerta"
+                    },
+                    {
+                      "expression": "`latitud`",
+                      "name": "latitud"
+                    },
+                    {
+                      "expression": "`longitud`",
+                      "name": "longitud"
+                    },
+                    {
+                      "expression": "`provincia`",
+                      "name": "provincia"
+                    },
+                    {
+                      "expression": "`casos_4s`",
+                      "name": "casos_4s"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`dpa_provin` <> '20'"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "data": {
+                "queryName": "main_query"
+              },
+              "encodings": {
+                "color": {
+                  "displayName": "Alerta",
+                  "fieldName": "alerta",
+                  "scale": {
+                    "mappings": [
+                      {
+                        "color": "#d03b3b",
+                        "value": "Roja"
+                      },
+                      {
+                        "color": "#fab219",
+                        "value": "Amarilla"
+                      },
+                      {
+                        "color": "#0ca30c",
+                        "value": "Verde"
+                      },
+                      {
+                        "color": "#8a8a85",
+                        "value": "Sin canal"
+                      }
+                    ],
+                    "type": "categorical"
+                  }
+                },
+                "coordinates": {
+                  "latitude": {
+                    "fieldName": "latitud"
+                  },
+                  "longitude": {
+                    "fieldName": "longitud"
+                  }
+                },
+                "extra": [
+                  {
+                    "displayName": "Provincia",
+                    "fieldName": "provincia"
+                  }
+                ],
+                "size": {
+                  "displayName": "Casos en 4 semanas",
+                  "fieldName": "casos_4s",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "frame": {
+                "description": {
+                  "fields": [],
+                  "value": "El punto es la capital; su tamaño, los casos esperados en 4 semanas. Galápagos está en la tabla"
+                },
+                "showDescription": true,
+                "showTitle": true,
+                "title": {
+                  "fields": [],
+                  "value": "Alerta por provincia"
+                }
+              },
+              "mark": {
+                "opacity": 0.85
+              },
+              "version": 2,
+              "widgetType": "symbol-map"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 10,
+            "width": 7,
+            "x": 5,
+            "y": 5
+          },
+          "widget": {
+            "name": "tabla",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_boletin",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "expression": "`provincia`",
+                      "name": "provincia"
+                    },
+                    {
+                      "expression": "`etiqueta`",
+                      "name": "etiqueta"
+                    },
+                    {
+                      "expression": "`motivo`",
+                      "name": "motivo"
+                    },
+                    {
+                      "expression": "`casos_semana`",
+                      "name": "casos_semana"
+                    },
+                    {
+                      "expression": "`casos_4s`",
+                      "name": "casos_4s"
+                    },
+                    {
+                      "expression": "`camas_promedio`",
+                      "name": "camas_promedio"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "data": {
+                "queryName": "main_query"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "displayName": "Provincia",
+                    "fieldName": "provincia"
+                  },
+                  {
+                    "displayName": "Alerta",
+                    "fieldName": "etiqueta",
+                    "style": {
+                      "type": "html"
+                    }
+                  },
+                  {
+                    "displayName": "Motivo",
+                    "fieldName": "motivo"
+                  },
+                  {
+                    "displayName": "Casos de la semana",
+                    "fieldName": "casos_semana"
+                  },
+                  {
+                    "displayName": "Casos en 4 semanas",
+                    "fieldName": "casos_4s"
+                  },
+                  {
+                    "displayName": "Camas ocupadas",
+                    "fieldName": "camas_promedio"
+                  }
+                ]
+              },
+              "frame": {
+                "description": {
+                  "fields": [],
+                  "value": "Ordenado por alerta y casos esperados. Casos en 4 semanas: la suma del pronóstico de las próximas 4"
+                },
+                "showDescription": true,
+                "showTitle": true,
+                "title": {
+                  "fields": [],
+                  "value": "Boletín de la semana"
+                }
+              },
+              "version": 2,
+              "widgetType": "table"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 2,
+            "width": 3,
+            "x": 0,
+            "y": 15
+          },
+          "widget": {
+            "name": "provincia",
+            "queries": [
+              {
+                "name": "provincia_serie",
+                "query": {
+                  "datasetName": "ds_serie",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "expression": "`provincia`",
+                      "name": "provincia"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "fields": [
+                  {
+                    "displayName": "Provincia",
+                    "fieldName": "provincia",
+                    "queryName": "provincia_serie"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Provincia"
+              },
+              "selection": {
+                "defaultSelection": {
+                  "values": {
+                    "dataType": "STRING",
+                    "values": [
+                      {
+                        "value": "MANABÍ"
+                      }
+                    ]
+                  }
+                }
+              },
+              "version": 2,
+              "widgetType": "filter-single-select"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 2,
+            "width": 9,
+            "x": 3,
+            "y": 15
+          },
+          "widget": {
+            "multilineTextboxSpec": {
+              "lines": [
+                "La provincia elegida cambia solo el gráfico de abajo: sus casos de las últimas 26 semanas, el pronóstico de las 4 siguientes con su intervalo del 80 % y los umbrales de su canal endémico (con un mínimo de 5 casos).\n"
+              ]
+            },
+            "name": "nota_serie"
+          }
+        },
+        {
+          "position": {
+            "height": 7,
+            "width": 12,
+            "x": 0,
+            "y": 17
+          },
+          "widget": {
+            "name": "serie",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_serie",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "expression": "`semana`",
+                      "name": "semana"
+                    },
+                    {
+                      "expression": "SUM(`casos`)",
+                      "name": "sum(casos)"
+                    },
+                    {
+                      "expression": "`serie`",
+                      "name": "serie"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "color": {
+                  "displayName": "Serie",
+                  "fieldName": "serie",
+                  "scale": {
+                    "mappings": [
+                      {
+                        "color": "#2a78d6",
+                        "value": "Casos"
+                      },
+                      {
+                        "color": "#eb6834",
+                        "value": "Pronóstico"
+                      },
+                      {
+                        "color": "#f4b393",
+                        "value": "Límite bajo (80 %)"
+                      },
+                      {
+                        "color": "#f4b393",
+                        "value": "Límite alto (80 %)"
+                      },
+                      {
+                        "color": "#52514e",
+                        "value": "Umbral epidémico"
+                      },
+                      {
+                        "color": "#a8a79f",
+                        "value": "Umbral de alerta"
+                      }
+                    ],
+                    "type": "categorical"
+                  }
+                },
+                "x": {
+                  "displayName": "Semana",
+                  "fieldName": "semana",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "displayName": "Casos por semana",
+                  "fieldName": "sum(casos)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "frame": {
+                "description": "Si el pronóstico pasa el umbral epidémico dos emisiones seguidas, la alerta es roja",
+                "showDescription": true,
+                "showTitle": true,
+                "title": "Casos, pronóstico y canal endémico"
+              },
+              "version": 3,
+              "widgetType": "line"
+            }
+          }
+        },
+        {
+          "position": {
+            "height": 6,
+            "width": 12,
+            "x": 0,
+            "y": 24
+          },
+          "widget": {
+            "name": "historial",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_historial",
+                  "disaggregated": false,
+                  "fields": [
+                    {
+                      "expression": "`emision`",
+                      "name": "emision"
+                    },
+                    {
+                      "expression": "SUM(`provincias`)",
+                      "name": "sum(provincias)"
+                    },
+                    {
+                      "expression": "`alerta`",
+                      "name": "alerta"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "encodings": {
+                "color": {
+                  "displayName": "Alerta",
+                  "fieldName": "alerta",
+                  "scale": {
+                    "mappings": [
+                      {
+                        "color": "#d03b3b",
+                        "value": "Roja"
+                      },
+                      {
+                        "color": "#fab219",
+                        "value": "Amarilla"
+                      },
+                      {
+                        "color": "#0ca30c",
+                        "value": "Verde"
+                      },
+                      {
+                        "color": "#8a8a85",
+                        "value": "Sin canal"
+                      }
+                    ],
+                    "type": "categorical"
+                  }
+                },
+                "x": {
+                  "displayName": "Emisión (inicio de la SE)",
+                  "fieldName": "emision",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "displayName": "Provincias",
+                  "fieldName": "sum(provincias)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "frame": {
+                "description": "Las últimas 12 emisiones",
+                "showDescription": true,
+                "showTitle": true,
+                "title": "Provincias por nivel de alerta"
+              },
+              "version": 3,
+              "widgetType": "bar"
+            }
+          }
+        }
+      ],
+      "layoutVersion": "GRID_V1",
+      "name": "boletin",
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ],
+  "uiSettings": {
+    "applyModeEnabled": false,
+    "genieSpace": {
+      "enablementMode": "ENABLED",
+      "isEnabled": true,
+      "overrideId": "01f1df73d4871c828bf209f6998527e2"
+    },
+    "theme": {
+      "canvasBackgroundColor": {
+        "dark": "#121211",
+        "light": "#f7f6f3"
+      },
+      "fontColor": {
+        "dark": "#f0efec",
+        "light": "#0b0b0b"
+      },
+      "selectionColor": {
+        "dark": "#8acaff",
+        "light": "#2272b4"
+      },
+      "visualizationColors": [
+        "#2a78d6",
+        "#eb6834",
+        "#1baf7a",
+        "#eda100",
+        "#e87ba4",
+        "#008300",
+        "#6250d6",
+        "#e34948"
+      ],
+      "widgetBackgroundColor": {
+        "dark": "#1a1a19",
+        "light": "#fcfcfb"
+      },
+      "widgetBorderColor": {
+        "dark": "#1a1a19",
+        "light": "#fcfcfb"
+      },
+      "widgetHeaderAlignment": "LEFT"
+    }
+  }
+}

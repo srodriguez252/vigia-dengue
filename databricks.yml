@@ -1,0 +1,15 @@
+# Vigía Dengue como código: el pipeline vigia-etl, el Job vigia-semanal y el dashboard del boletín
+# bundle generate los trajo de Databricks y los dejó atados (--bind); CI los despliega en cada push a main
+bundle:
+  name: vigia-dengue
+
+include:
+  - resources/*.yml
+
+targets:
+  prod:
+    mode: production
+    default: true
+    workspace:
+      # En producción hay una sola copia del bundle, en tu carpeta: sin esta línea, deploy no corre
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
