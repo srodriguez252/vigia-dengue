@@ -191,6 +191,77 @@ def test_anticipacion_y_alerta_saturada():
     assert a["saturada"] and not a["avisada"]
 
 
+def test_el_ultimo_dato_conocido_es_una_linea_base():
+    features = features_de_prueba()
+    features.loc[features["inicio_semana"] == CORTE, "casos_lag0"] = np.nan   # esa semana la gaceta no llegó
+    f = P.preparar(features)
+    semanas = features[["anio_epi", "semana_epi", "inicio_semana"]].drop_duplicates()
+    lineas = P.lineas_base(P.evaluacion(f, canal_de_prueba(features), semanas, CORTE - P.SEMANA, CORTE))
+    ultimo = (lineas[(lineas["modelo"] == "ultimo") & (lineas["dpa_provin"] == "13")]
+              .sort_values(["emision", "horizonte"]).groupby("emision")["pronostico"].apply(list))
+    sabido = f[f["dpa_provin"] == "13"].set_index("inicio_semana")
+    # Los 4 horizontes repiten los casos de la última semana conocida
+    assert ultimo[CORTE - P.SEMANA] == [sabido.loc[CORTE - P.SEMANA, "casos_lag0"]] * 4
+    # Si la gaceta de la SE emitida no se había publicado, es la semana anterior
+    assert ultimo[CORTE] == [sabido.loc[CORTE, "casos_lag1"]] * 4
+
+
+def serie_con_casos(casos, q3=20.0):
+    """La serie final de una provincia desde la SE 1 de 2023, con un canal fijo"""
+    semanas = pd.date_range("2023-01-01", periods=len(casos), freq="7D")
+    anios, numeros = semana_epi(semanas)
+    return pd.DataFrame(dict(dpa_provin="13", provincia="MANABI", inicio_semana=semanas,
+                             casos=np.asarray(casos, dtype=float), anio_epi=anios, semana_epi=numeros, q3_real=q3))
+
+
+def boletines_en_rojo(serie, emisiones_rojas):
+    """Un boletín por semana de la serie, en rojo en las emisiones (su posición en la serie) que se indican"""
+    b = serie.rename(columns={"inicio_semana": "emision"})[["dpa_provin", "provincia", "emision", "anio_epi",
+                                                            "semana_epi"]]
+    b = b.assign(modelo="m", subida=0.0, fecha_emision=b["emision"] + pd.Timedelta(days=13),
+                 roja=b.index.isin(emisiones_rojas))
+    return b.assign(nivel=np.where(b["roja"], "roja", "verde"))
+
+
+def test_un_brote_empieza_cuando_la_provincia_sale_de_la_calma():
+    calma, brote = [10.0] * 12, [30.0] * 6
+    # Calma con un salto de una sola semana, un brote, 3 semanas de calma y otro brote pegado al primero
+    casos = calma[:5] + [90.0] + calma[6:] + brote + [10.0] * 3 + brote + [10.0] * 4
+    inicios = P.inicios_de_brote(serie_con_casos(casos))
+    # El salto no es un brote, y el segundo brote no es un inicio: la provincia no había vuelto a la calma
+    assert inicios["inicio"].tolist() == [pd.Timestamp("2023-01-01") + 12 * P.SEMANA]
+    assert (inicios.loc[0, "casos"], inicios.loc[0, "umbral"]) == (30.0, 20.0)
+    assert P.inicios_de_brote(serie_con_casos([30.0] * 30)).empty                # siempre epidémica: sin inicio
+    assert P.inicios_de_brote(serie_con_casos(calma + brote, q3=np.nan)).empty   # sin canal no hay zona epidémica
+
+
+def test_avisos_de_inicio_y_falsas_alarmas():
+    serie = serie_con_casos([10.0] * 12 + [30.0] * 10 + [10.0] * 30)   # el brote empieza en la semana 12
+    inicio = pd.Timestamp("2023-01-01") + 12 * P.SEMANA
+
+    def aviso(rojas):
+        b = boletines_en_rojo(serie, rojas)
+        return P.avisos_de_inicio(b, P.inicios_de_brote(serie)).iloc[0], P.metricas_inicio(b, serie)
+
+    # La emisión 7 se publica 13 días después de empezar su semana: 22 días antes del inicio, 3 semanas completas
+    a, m = aviso([7, 8])
+    assert (a["estado"], a["anticipacion"], a["publicada"]) == ("a tiempo", 3.0, inicio - pd.Timedelta(days=22))
+    assert (m["inicios"], m["inicios_a_tiempo"], m["anticipacion_inicio"], m["falsas_inicio"]) == (1, 1, 3.0, 0)
+    # La roja de la emisión 12 se publica con el brote ya empezado: tarde
+    a, m = aviso([12])
+    assert a["estado"] == "tarde" and np.isnan(a["anticipacion"])
+    assert (m["inicios_tarde"], m["falsas_inicio"]) == (1, 0)
+    # Una roja en pleno brote, 6 semanas después, no lo avisó; tampoco es falsa alarma
+    a, m = aviso([18])
+    assert a["estado"] == "sin aviso" and (m["inicios_sin_aviso"], m["falsas_inicio"]) == (1, 0)
+    # Una racha roja en calma, lejos de cualquier inicio, es falsa alarma; cuenta una vez aunque dure 2 semanas
+    a, m = aviso([7, 30, 31])
+    assert (m["inicios_a_tiempo"], m["falsas_inicio"]) == (1, 1)
+    assert m["falsas_inicio_por_anio"] == pytest.approx(P.SEMANAS_POR_ANIO / len(serie))
+    # Una racha demasiado reciente para saber si después empezó un brote no se cuenta
+    assert aviso([49])[1]["falsas_inicio"] == 0
+
+
 def test_el_grafico_tiene_un_panel_por_provincia_de_la_costa():
     pytest.importorskip("matplotlib")
     serie, b = serie_y_rojas(P.COSTA, pd.Timestamp("2024-01-14"))

@@ -32,7 +32,7 @@ VARIABLES = VARIABLES_FIJAS + VARIABLES_CASOS + VARIABLES_CLIMA
 ETIQUETAS = [f"e_h{h}" for h in HORIZONTES]     # para entrenar: lo que se sabía 3 semanas después
 OBJETIVOS = [f"y_h{h}" for h in HORIZONTES]     # para evaluar: los casos finales
 FECHAS = ["inicio_semana", "fecha_emision", "emision", "objetivo", "origen", "pico", "valle", "primera_roja",
-          "roja_desde"]
+          "roja_desde", "inicio", "publicada"]
 
 HIPERPARAMETROS = dict(loss="poisson", learning_rate=0.1, max_iter=100, max_leaf_nodes=15, min_samples_leaf=20,
                        l2_regularization=1.0, early_stopping=False, random_state=0)
@@ -141,12 +141,15 @@ def evaluacion(f, canal, semanas, desde, hasta=None):
     - canal_mediana y canal_q3: el canal del año de la emisión en la SE pronosticada. Ya se conocía al emitir, y
       con él se decide la alerta
     - q3_real: el q3 del canal del año de la SE pronosticada. Solo sirve para saber si esa semana fue epidémica
+    - casos_ultimo: los casos de la semana más reciente que se conocía al emitir, entre la SE emitida y las 3
+      anteriores. Si la gaceta de la SE emitida no se había publicado, es la de una semana antes
     - evaluable: tiene valor real, canal y casos recientes. Todos los modelos se comparan en estas mismas filas
     """
     hasta = f["inicio_semana"].max() if hasta is None else pd.Timestamp(hasta)
     claves = ["dpa_provin", "provincia", "inicio_semana", "anio_epi", "semana_epi", "fecha_emision",
-              "casos_media_4s", "casos_media_12s"]
+              "casos_media_4s", "casos_media_12s", "casos_ultimo"]
     e = f[f["inicio_semana"].between(pd.Timestamp(desde), hasta)]
+    e = e.assign(casos_ultimo=e[[f"casos_lag{k}" for k in range(4)]].bfill(axis=1).iloc[:, 0])
     b = e[claves + OBJETIVOS].melt(id_vars=claves, value_vars=OBJETIVOS, var_name="horizonte", value_name="real")
     b["horizonte"] = b["horizonte"].str.replace("y_h", "").astype("int64")
     b = b.rename(columns={"inicio_semana": "emision"})
@@ -166,15 +169,20 @@ def evaluacion(f, canal, semanas, desde, hasta=None):
 
 
 def lineas_base(base):
-    """Los dos pronósticos de referencia, para las mismas filas que el modelo
+    """Los tres pronósticos de referencia, para las mismas filas que el modelo
 
     - canal: la mediana del canal endémico de la SE pronosticada, lo que se espera en un año normal
     - ingenuo: el promedio de las últimas 4 semanas conocidas (o de 12, si faltan), igual para los 4 horizontes
+    - ultimo: los casos de la última semana conocida, igual para los 4 horizontes. A diferencia del ingenuo, sí
+      puede cumplir la condición de subida de la regla de alerta: sube cuando la última semana pasa del promedio.
+      Es la regla sin modelo contra la que hay que medir las alertas
     """
     claves = base[["dpa_provin", "emision", "horizonte"]]
     canal = claves.assign(modelo="canal", pronostico=base["canal_mediana"])
-    ingenuo = claves.assign(modelo="ingenuo", pronostico=base["casos_media_4s"].fillna(base["casos_media_12s"]))
-    partes = pd.concat([canal, ingenuo], ignore_index=True).assign(origen=pd.NaT)
+    promedio = base["casos_media_4s"].fillna(base["casos_media_12s"])
+    ingenuo = claves.assign(modelo="ingenuo", pronostico=promedio)
+    ultimo = claves.assign(modelo="ultimo", pronostico=base["casos_ultimo"].fillna(promedio))
+    partes = pd.concat([canal, ingenuo, ultimo], ignore_index=True).assign(origen=pd.NaT)
     return partes[["modelo", "dpa_provin", "emision", "horizonte", "pronostico", "origen"]]
 
 
@@ -340,8 +348,127 @@ def anticipacion(b, serie, anio=2024, antes=26):
     return a
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Inicios de brote
+# ---------------------------------------------------------------------------------------------------------------
+
+SEMANAS_BROTE = 4          # un brote empieza con 4 semanas seguidas en zona epidémica...
+SEMANAS_CALMA = 8          # ...después de 8 semanas con canal en las que, a lo sumo,
+EPIDEMICAS_EN_CALMA = 2    # 2 estuvieron en zona epidémica...
+ENTRE_BROTES = 12          # ...y al menos 12 semanas después del inicio anterior
+AVISO_ANTES = 8            # el aviso es a tiempo si la roja se publica hasta 8 semanas antes del inicio
+AVISO_DESPUES = 4          # y tardío si se publica en las 4 semanas siguientes
+
+
+def semanas_epidemicas(serie):
+    """Por provincia y SE, si la semana está en zona epidémica según los casos finales
+
+    Lo está si la mediana de 3 semanas (la anterior, ella y la siguiente) pasa el q3 del canal de su año y PISO.
+    La mediana quita los saltos de una sola semana, como el cero que deja un acumulado que baja. Las semanas que
+    faltan en la serie y las que no tienen canal no cuentan como epidémicas
+    """
+    partes = []
+    for (dpa, provincia), s in serie.groupby(["dpa_provin", "provincia"]):
+        s = s.set_index("inicio_semana").sort_index()
+        s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="7D"))
+        suave = s["casos"].rolling(3, center=True, min_periods=2).median()
+        partes.append(pd.DataFrame({
+            "dpa_provin": dpa, "provincia": provincia, "inicio_semana": s.index, "casos_suaves": suave.to_numpy(),
+            "q3_real": s["q3_real"].to_numpy(),
+            "epidemica": (suave > np.maximum(s["q3_real"], PISO)).to_numpy()}))
+    return pd.concat(partes, ignore_index=True)
+
+
+def inicios_de_brote(serie):
+    """Los inicios de brote de cada provincia: el paso de la calma a la zona epidémica
+
+    Un inicio es la primera de SEMANAS_BROTE semanas epidémicas seguidas, cuando las SEMANAS_CALMA anteriores
+    tenían canal y a lo sumo EPIDEMICAS_EN_CALMA fueron epidémicas, y pasaron ENTRE_BROTES semanas desde el
+    inicio anterior. Es lo que una alerta temprana tiene que anunciar. No depende del pico, que solo se conoce al
+    terminar la temporada, y una provincia que ya está en zona epidémica no vuelve a tener inicio hasta que baja
+    """
+    filas = []
+    for (dpa, provincia), e in semanas_epidemicas(serie).groupby(["dpa_provin", "provincia"]):
+        e = e.reset_index(drop=True)
+        epidemica, con_canal = e["epidemica"].to_numpy(), e["q3_real"].notna().to_numpy()
+        anterior = None
+        for i in range(SEMANAS_CALMA, len(e) - SEMANAS_BROTE + 1):
+            previas = slice(i - SEMANAS_CALMA, i)
+            en_calma = con_canal[previas].all() and epidemica[previas].sum() <= EPIDEMICAS_EN_CALMA
+            if not (en_calma and epidemica[i:i + SEMANAS_BROTE].all()):
+                continue
+            if anterior is not None and i - anterior < ENTRE_BROTES:
+                continue
+            anterior = i
+            filas.append(dict(dpa_provin=dpa, provincia=provincia, inicio=e.loc[i, "inicio_semana"],
+                              casos=float(e.loc[i, "casos_suaves"]), umbral=float(max(e.loc[i, "q3_real"], PISO))))
+    return pd.DataFrame(filas, columns=["dpa_provin", "provincia", "inicio", "casos", "umbral"])
+
+
+def avisos_de_inicio(b, inicios):
+    """Para cada inicio de brote, si los boletines `b` (un modelo y una regla) lo avisaron y con cuánta anticipación
+
+    - a tiempo: hay una roja publicada entre AVISO_ANTES semanas antes del inicio y el día en que empieza su semana
+    - tarde: la primera roja se publicó en las AVISO_DESPUES semanas siguientes
+    - sin aviso: ninguna de las dos
+    - anticipacion: las semanas completas entre la publicación de la primera roja a tiempo y el inicio
+
+    Un inicio solo se evalúa si la provincia ya tenía boletines AVISO_ANTES semanas antes
+    """
+    primer_boletin = b[b["nivel"].notna()].groupby("dpa_provin")["fecha_emision"].min()
+    rojas = b[b["roja"]]
+    filas = []
+    for i in inicios.itertuples(index=False):
+        desde = i.inicio - AVISO_ANTES * SEMANA
+        if i.dpa_provin not in primer_boletin.index or primer_boletin[i.dpa_provin] > desde:
+            continue
+        publicadas = rojas.loc[rojas["dpa_provin"] == i.dpa_provin, "fecha_emision"]
+        antes = publicadas[publicadas.between(desde, i.inicio)]
+        despues = publicadas[(publicadas > i.inicio) & (publicadas <= i.inicio + AVISO_DESPUES * SEMANA)]
+        estado = "a tiempo" if len(antes) else "tarde" if len(despues) else "sin aviso"
+        publicada = antes.min() if len(antes) else despues.min() if len(despues) else pd.NaT
+        filas.append({**i._asdict(), "estado": estado, "publicada": publicada,
+                      "anticipacion": float((i.inicio - publicada).days // 7) if len(antes) else np.nan})
+    a = pd.DataFrame(filas, columns=[*inicios.columns, "estado", "publicada", "anticipacion"])
+    a.insert(0, "modelo", b["modelo"].iloc[0])
+    a.insert(1, "subida", float(b["subida"].iloc[0]))
+    return a
+
+
+def metricas_inicio(b, serie):
+    """Cuántos inicios de brote avisaron los boletines `b` y cuántas de sus rachas rojas fueron falsas alarmas
+
+    Una racha roja es falsa alarma si empieza en una semana que no es epidémica y ningún brote empieza entre
+    AVISO_DESPUES semanas antes y AVISO_ANTES semanas después de su publicación. Una roja que se enciende con el
+    brote ya en curso no avisa nada, pero tampoco es falsa. Las rachas demasiado recientes para saber si después
+    empezó un brote no se cuentan
+    """
+    inicios = inicios_de_brote(serie)
+    a = avisos_de_inicio(b, inicios)
+    con_nivel = b[b["nivel"].notna()].copy()
+    con_nivel["empieza"] = con_nivel["roja"] & ~_anterior(con_nivel.assign(r=con_nivel["roja"]), "r")
+    epidemicas = semanas_epidemicas(serie).rename(columns={"inicio_semana": "emision"})
+    rachas = con_nivel[con_nivel["empieza"]].merge(epidemicas[["dpa_provin", "emision", "epidemica"]],
+                                                   on=["dpa_provin", "emision"], how="left")
+    ultimo_inicio_visible = serie["inicio_semana"].max() - (SEMANAS_BROTE - 1) * SEMANA
+    falsas = 0
+    for r in rachas.itertuples(index=False):
+        hasta = r.fecha_emision + AVISO_ANTES * SEMANA
+        cerca = inicios[(inicios["dpa_provin"] == r.dpa_provin)
+                        & inicios["inicio"].between(r.fecha_emision - AVISO_DESPUES * SEMANA, hasta)]
+        falsas += int(cerca.empty and r.epidemica != True and hasta <= ultimo_inicio_visible)  # noqa: E712
+    anios = len(con_nivel) / SEMANAS_POR_ANIO
+    a_tiempo = a["estado"] == "a tiempo"
+    return dict(inicios=int(len(a)), inicios_a_tiempo=int(a_tiempo.sum()),
+                inicios_tarde=int((a["estado"] == "tarde").sum()),
+                inicios_sin_aviso=int((a["estado"] == "sin aviso").sum()),
+                anticipacion_inicio=float(a.loc[a_tiempo, "anticipacion"].median()) if a_tiempo.any() else np.nan,
+                falsas_inicio=falsas, falsas_inicio_por_anio=falsas / anios if anios else np.nan)
+
+
 def resumen_regla(b, base, serie, anio=2024):
-    """Una fila con las métricas de una regla: sensibilidad, falsas alarmas y anticipación en la Costa y Manabi
+    """Una fila con las métricas de una regla: sensibilidad, falsas alarmas, inicios de brote avisados y
+    anticipación en la Costa y Manabi
 
     En la anticipación de la Costa, una provincia con brote que no fue avisada (o cuya alerta estaba saturada)
     cuenta como 0 semanas
@@ -359,7 +486,8 @@ def resumen_regla(b, base, serie, anio=2024):
                 costa_con_brote=int(len(costa)), costa_avisadas=int(costa["avisada"].sum()),
                 anticipacion_manabi=float(manabi["anticipacion"].iloc[0])
                 if len(manabi) and manabi["avisada"].iloc[0] else np.nan,
-                manabi_roja_desde=manabi["roja_desde_se"].iloc[0] if len(manabi) else None)
+                manabi_roja_desde=manabi["roja_desde_se"].iloc[0] if len(manabi) else None,
+                **metricas_inicio(b, serie))
 
 
 def elegir_regla(reglas, presupuesto=1.0):
@@ -374,7 +502,8 @@ def elegir_regla(reglas, presupuesto=1.0):
 def tabla_resumen(error, reglas):
     """La tabla del backtest: el error por horizonte de cada modelo y, en los que tienen reglas, sus métricas"""
     t = error.merge(reglas, on="modelo", how="left")
-    enteras = ["filas", "semanas_epidemicas", "rachas_rojas", "falsas_alarmas", "costa_con_brote", "costa_avisadas"]
+    enteras = ["filas", "semanas_epidemicas", "rachas_rojas", "falsas_alarmas", "costa_con_brote", "costa_avisadas",
+               "inicios", "inicios_a_tiempo", "inicios_tarde", "inicios_sin_aviso", "falsas_inicio"]
     t = t.astype({c: "Int64" for c in enteras})     # enteros que admiten nulos: los modelos sin reglas
     t["elegida"] = t["elegida"].eq(True)
     return t
