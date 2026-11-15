@@ -19,32 +19,88 @@ The decision it supports: which provinces should get vector control and supplies
 ## How it works
 
 ```mermaid
-flowchart LR
-    msp["MSP weekly bulletins<br/>PDF, 2017–2026"] --> dl["Download tasks<br/>gacetas · clima"]
-    om["Open-Meteo<br/>ERA5 and ERA5-Land"] --> dl
-    noaa["NOAA CPC<br/>Niño 1+2 index"] --> gha["GitHub Actions<br/>Tuesdays"]
-    inec["INEC<br/>discharges, population"] --> nb["Yearly notebooks"]
-    dl --> vol[("Volume<br/>vigia.bronze.landing")]
+flowchart TB
+    subgraph SRC["Public sources"]
+        direction LR
+        msp["MSP bulletins<br/>weekly PDF, 5 layouts"]
+        om["Open-Meteo<br/>ERA5 and ERA5-Land"]
+        noaa["NOAA CPC<br/>Niño 1+2 index"]
+        inec["INEC<br/>discharges, population"]
+    end
+
+    dl["Tasks Gacetas and Clima<br/>every Saturday, 2 retries"]
+    gha["GitHub Actions<br/>Tuesdays"]
+    nb["Notebooks<br/>once a year, by hand"]
+    vol[("Unity Catalog volume<br/>vigia.bronze.landing")]
+
+    subgraph ETL["Task ETL: Lakeflow pipeline vigia-etl"]
+        direction LR
+        bronze["bronze<br/>Auto Loader,<br/>streaming tables"] --> silver["silver<br/>PDF parser, one version<br/>per bulletin cut-off date"] --> feat["gold<br/>weekly cases, endemic channel,<br/>no-look-ahead features"]
+        silver -.-> dq[/"quarantine and<br/>reconciliation tables"/]
+    end
+
+    subgraph ML["Model: re-run by hand"]
+        direction LR
+        bt["Rolling-origin backtest<br/>tracked in MLflow"] --> reg[("Unity Catalog registry<br/>pronostico_dengue@champion")]
+    end
+
+    subgraph WK["Weekly bulletin"]
+        direction LR
+        fc["Task Pronostico<br/>1–4 weeks, 80% interval,<br/>bed-days"] --> al["Task Alerta<br/>level and reason"] --> out[("gold.pronosticos<br/>gold.alertas<br/>append-only")]
+    end
+
+    subgraph USE["Consumption"]
+        direction TB
+        dash["Task Boletin<br/>AI/BI dashboard,<br/>emailed as PDF"]
+        genie["Genie Agent<br/>questions in Spanish"]
+    end
+
+    msp --> dl
+    om --> dl
+    noaa --> gha
+    inec --> nb
+    dl --> vol
     gha --> vol
     nb --> vol
-    vol --> etl["Lakeflow pipeline vigia-etl<br/>bronze → silver → gold"]
-    etl --> fc["Forecast 1–4 weeks<br/>with the champion model"]
-    reg["MLflow backtest<br/>Unity Catalog model registry"] --> fc
-    fc --> al["Alert level, reason<br/>and bed-days"]
-    al --> gold[("gold.pronosticos<br/>gold.alertas")]
-    gold --> dash["AI/BI dashboard<br/>emailed as PDF"]
-    gold --> genie["Genie Agent<br/>questions in Spanish"]
+    vol --> ETL
+    ETL -. "features" .-> ML
+    ETL -- "features of the week" --> WK
+    ML -. "champion and alert rule" .-> WK
+    WK --> USE
+
     classDef job fill:#dbeafe,stroke:#2272b4,color:#0b2545
-    class dl,etl,fc,al,dash job
+    classDef manual fill:#f3f4f6,stroke:#6b7280,color:#111827,stroke-dasharray: 5 4
+    class dl,bronze,silver,feat,dq,fc,al,dash job
+    class nb,bt manual
 ```
 
-Blue boxes are the tasks of the job `vigia-semanal`, which runs every Saturday at 08:00, Ecuador time.
+Blue boxes run inside the job `vigia-semanal`, every Saturday at 08:00, Ecuador time. Dashed gray boxes are run by hand, and dashed arrows are the offline path: the backtest reads the gold features and leaves the champion model and its alert rule in the registry. The dashboard and Genie also read the pipeline's gold tables (`dengue_semana`, `canal_endemico`).
+
+The job's six tasks, and how a change reaches them:
+
+```mermaid
+flowchart LR
+    subgraph CI["GitHub Actions, every push"]
+        direction LR
+        T["pytest<br/>41 tests"] --> D["bundle validate,<br/>plan and deploy<br/>(main only)"] --> W[("Pipeline, job and<br/>dashboard in prod")]
+    end
+    subgraph JOB["Job vigia-semanal, Saturdays 08:00 (Ecuador)"]
+        direction LR
+        G["Gacetas"] --> E["ETL<br/>runs even if a<br/>download failed"]
+        C["Clima"] --> E
+        E --> P["Pronostico"] --> A["Alerta"] --> B["Boletin"]
+    end
+    classDef job fill:#dbeafe,stroke:#2272b4,color:#0b2545
+    classDef ci fill:#f3f4f6,stroke:#6b7280,color:#111827
+    class G,C,E,P,A,B job
+    class T,D ci
+```
 
 - **Ingestion.** Download notebooks and a GitHub Actions workflow land raw files in a Unity Catalog volume. Auto Loader reads only new files.
 - **ETL.** One Lakeflow Spark Declarative Pipeline (`vigia-etl`, 20 source files) builds the bronze, silver and gold tables, with expectations that drop bad rows or stop the update.
 - **Model.** A gradient boosting model, chosen by a rolling-origin backtest and registered in Unity Catalog through MLflow.
 - **Weekly run.** A six-task job forecasts the weeks still missing, applies the alert rule, estimates bed-days and emails the dashboard as a PDF.
-- **Operations.** The pipeline, the job and the dashboard are code in a Declarative Automation Bundle. GitHub Actions runs 26 tests on every push and deploys the bundle when they pass on `main`.
+- **Operations.** The pipeline, the job and the dashboard are code in a Declarative Automation Bundle. GitHub Actions runs 41 tests on every push and deploys the bundle when they pass on `main`.
 
 ## Results
 
@@ -80,7 +136,7 @@ With the chosen rule, Santo Domingo de los Tsáchilas was warned 24 weeks before
 
 ## Design decisions
 
-- **No look-ahead.** Each MSP bulletin is stored as a version with its cut-off date. The features of week *t* use only what had been published 7 days after the week closed, and the training labels are the case counts as known 3 weeks later. Two tests perturb everything that was not known on a given date and require identical features and forecasts.
+- **No look-ahead.** Each MSP bulletin is stored as a version with its cut-off date and the date it can be shown to have been online. The Ministry does not publish upload dates, and many bulletins went up weeks after their cut-off, several at a time, so the publication date comes from three traces: the server's `Last-Modified` header, the upload-month folder in the URL, and the first weekly run that saw the link. A bulletin counts from the latest date those traces allow. The features of week *t*, issued 7 days after the week closed, use only the bulletins already published that day, and the training labels are the case counts as known 3 weeks later. Two tests perturb everything that was not known on a given date and require identical features and forecasts.
 - **A PDF parser that quarantines instead of guessing.** pdfplumber runs inside `mapInPandas` and reads five table layouts from 2017 to 2026 by the position of each number. A bulletin it cannot read with confidence goes to a quarantine table, and every bulletin with a total row is reconciled against it.
 - **Rates back to cases.** From mid-2025 to mid-2026 the bulletins publish rates only. They are converted with the population the MSP itself used, deduced from its earlier bulletins, and every row says whether its cases come from the PDF or are estimated.
 - **A bulletin that carries the previous year.** The total row of the bulletin for week 1 of 2025 adds all the cases of 2024 to the 547 of its own week. Weekly cases are the growth of each year's highest cumulative count, so that one bulletin gave Manabí 10,473 cases in the first week of 2025, about its whole 2024, and zero in the other 52 weeks. A bulletin from the first 4 weeks of a year is dropped when its national cumulative count reaches half of the previous year's highest count known at its cut-off date; its week is filled like any other gap, and a test reproduces the case.
@@ -98,6 +154,7 @@ With the chosen rule, Santo Domingo de los Tsáchilas was warned 24 weeks before
 - **The chosen rule trades sensitivity for timing.** It catches 33% of epidemic weeks 2 to 4 weeks ahead, against 89% for the plan's rule, because it only turns red on a rising forecast. That condition is what lets it warn 5 of 7 coastal provinces of the 2024 rise instead of 2.
 - **Saturated alerts.** Manabí's cases were above its epidemic threshold every week from week 21 of 2023 to the end of 2024 (84 weeks), and with the plan's rule its alert stayed red from week 22 of 2023. A province already in red cannot be warned again, so lead time is measured from the 2024 rise.
 - **The bulletins have gaps.** From 2017 to 2026, 21 weeks were never posted, 3 links are broken and 4 PDFs cannot be read, and figures are revised in later bulletins. The growth across a gap is spread evenly over its weeks.
+- **Publication dates are exact only since March 2024.** Bulletins uploaded since then keep their original server date, and it always falls in the month of their URL folder. Every earlier file shows the same bulk re-upload of 2 March 2024, so the folder is the only trace: those bulletins count from the last day of their upload month, up to a month after the real upload, and the ones of 2017–2019 with no usable trace still count from their cut-off date. `publicacion_origen` marks each case, and `publicacion_desde` keeps the earliest possible date, to rerun the backtest at the other end of the range.
 - **Hospital data arrive late.** INEC discharges are published more than a year later, so they calibrate bed-days but do not feed the weekly forecast. Bed-days are an order of magnitude, not a capacity plan.
 - **Short channel history.** The endemic channel needs at least 5 previous years, so it starts in 2022 or 2023 depending on the province.
 - **Free Edition limits.** Serverless compute only, one pipeline, limited outbound internet, and Open-Meteo's free tier for non-commercial use, which spreads the weather history over several days.
@@ -107,13 +164,13 @@ With the chosen rule, Santo Domingo de los Tsáchilas was warned 24 weeks before
 | Path | What it holds |
 | --- | --- |
 | `vigia-etl/transformations/` | Lakeflow pipeline: bronze, silver and gold tables |
-| `vigia-etl/utilities/features.py` | Weekly cases, endemic channel and features, shared by the pipeline and the tests |
+| `vigia-etl/utilities/` | Weekly cases, endemic channel and features (`features.py`) and the publication date of each bulletin (`publicacion.py`), shared by the pipeline and the tests |
 | `src/modelos/` | Backtest, baselines, alert rule and metrics (`pronostico.py`); weekly forecast, interval and bed-days (`semanal.py`) |
 | `src/notebooks/` | Downloads, backtest, model registration, weekly forecast and alert |
 | `src/dashboards/` | AI/BI dashboard definition |
 | `src/setup/` | Catalog, schemas and volume; the 221 cantons with their weather point (`cantones.csv`) |
 | `databricks.yml`, `resources/` | Declarative Automation Bundle: pipeline, job and dashboard |
-| `tests/` | pytest suites: no-leakage tests, backtest and weekly bulletin |
+| `tests/` | pytest suites: no-leakage tests, publication dates, backtest and weekly bulletin |
 | `scripts/` | Niño download and the generator of `cantones.csv` |
 | `.github/workflows/` | Weekly Niño download; CI that tests and deploys the bundle |
 
