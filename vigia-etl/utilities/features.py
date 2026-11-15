@@ -8,6 +8,9 @@ usa lo que ya se sabía ese día:
 - las gacetas de la SE t o anteriores, cada una en la versión publicada hasta esa fecha
 - el clima, el Niño y la población de la SE t o anteriores
 - el canal endémico y lo normal del clima, hechos con años anteriores
+
+Una gaceta se conoce desde su fecha_publicacion (utilities/publicacion.py), no desde su fecha de corte: el corte
+dice hasta cuándo cuentan los datos, y el PDF puede subirse semanas después
 """
 import math
 
@@ -33,26 +36,31 @@ def semanas(calendario):
             .withColumn("fecha_emision", F.date_add("fin_semana", DIAS_PARA_EMITIR)))
 
 
-def gacetas(dengue_casos, semanas_df):
+def gacetas(dengue_casos, semanas_df, publicacion="fecha_publicacion"):
     """Una fila por gaceta, versión y provincia, con el acumulado del año hasta la semana de la gaceta
 
+    `publicacion` es la columna de dengue_casos con la fecha desde la que se conoce cada gaceta. La que usa el
+    pipeline, fecha_publicacion, es la más tardía que admiten los rastros de la subida; con publicacion_desde, la
+    más temprana, se mide cuánto cambia el backtest entre los dos extremos
+
     Descarta la gaceta de las primeras SEMANAS_INICIO semanas del año cuyo acumulado del país llega a FRACCION_CIERRE
-    del acumulado más alto del año anterior que se conocía a su fecha de corte: trae los casos de ese año. La de la
+    del acumulado más alto del año anterior que se conocía cuando se publicó: trae los casos de ese año. La de la
     SE 1 de 2025 suma en su Total los 61 352 casos de 2024 y los 547 de su semana. Su semana queda como un hueco,
     que se reparte con la gaceta siguiente
     """
     por_provincia = (dengue_casos
                      .where(F.col("provincia").isin(PROVINCIAS) & F.col("casos_acumulados").isNotNull())
                      .groupBy(F.col("provincia").alias("dpa_provin"), F.col("anio").alias("anio_epi"), "semana_epi",
-                              "version", "fecha_corte")
+                              "version", "fecha_corte", F.col(publicacion).alias("fecha_publicacion"))
                      .agg(F.max("casos_acumulados").cast("double").alias("acumulado")))
-    gaceta = ["anio_epi", "semana_epi", "version", "fecha_corte"]
+    gaceta = ["anio_epi", "semana_epi", "version", "fecha_corte", "fecha_publicacion"]
     pais = por_provincia.groupBy(*gaceta).agg(F.sum("acumulado").alias("pais"))
     anio_anterior = pais.select((F.col("anio_epi") + 1).alias("anio_siguiente"),
-                                F.col("fecha_corte").alias("corte_anterior"), F.col("pais").alias("pais_anterior"))
+                                F.col("fecha_publicacion").alias("publicacion_anterior"),
+                                F.col("pais").alias("pais_anterior"))
     con_el_anio_anterior = (pais.where(F.col("semana_epi") <= SEMANAS_INICIO)
                             .join(anio_anterior, (F.col("anio_epi") == F.col("anio_siguiente"))
-                                  & (F.col("corte_anterior") <= F.col("fecha_corte")))
+                                  & (F.col("publicacion_anterior") <= F.col("fecha_publicacion")))
                             .groupBy(*gaceta, "pais").agg(F.max("pais_anterior").alias("maximo_anterior"))
                             .where(F.col("pais") >= FRACCION_CIERRE * F.col("maximo_anterior"))
                             .select(*gaceta))
@@ -60,11 +68,14 @@ def gacetas(dengue_casos, semanas_df):
     return (por_provincia.alias("p").join(con_el_anio_anterior.alias("q"), misma_gaceta, "left_anti")
             .join(semanas_df.select("anio_epi", "semana_epi", "inicio_semana"), ["anio_epi", "semana_epi"])
             .select("dpa_provin", "anio_epi", F.col("semana_epi").alias("gaceta_semana"),
-                    F.col("inicio_semana").alias("inicio_gaceta"), "version", "fecha_corte", "acumulado"))
+                    F.col("inicio_semana").alias("inicio_gaceta"), "version", "fecha_corte", "fecha_publicacion",
+                    "acumulado"))
 
 
 def vigentes(gacetas_df, claves):
-    """La versión que vale de cada gaceta: la de fecha de corte más reciente; si empatan, la última versión"""
+    """La versión que vale de cada gaceta: la de fecha de corte más reciente; si empatan, la última versión
+
+    Qué versiones ya se conocían lo decide antes quien llama, con fecha_publicacion"""
     orden = Window.partitionBy(*claves, "dpa_provin", "anio_epi", "gaceta_semana").orderBy(
         F.col("fecha_corte").desc(), F.col("version").desc())
     return gacetas_df.withColumn("_n", F.row_number().over(orden)).where("_n = 1").drop("_n")
@@ -100,7 +111,7 @@ def casos_por_semana(gacetas_df, semanas_df, poblacion, provincias):
             .join(provincias, "dpa_provin", "left")
             .select("dpa_provin", "provincia", "anio_epi", "semana_epi", "inicio_semana",
                     F.round("casos", 2).alias("casos"), "imputado", "semanas_cubiertas", "casos_nuevos",
-                    "gaceta_semana", "version", "fecha_corte", "poblacion",
+                    "gaceta_semana", "version", "fecha_corte", "fecha_publicacion", "poblacion",
                     F.round(F.col("casos") / F.col("poblacion") * 100000, 3).alias("incidencia_100k")))
 
 
@@ -120,7 +131,7 @@ def canal_endemico(gacetas_df, semanas_df):
                .withColumn("anio_epi", F.explode(F.sequence(F.col("anio_canal") - ANIOS_CANAL,
                                                             F.col("anio_canal") - 1)))
                .join(gacetas_df, "anio_epi")
-               .where(F.col("fecha_corte") < F.col("inicio_anio")))
+               .where(F.col("fecha_publicacion") < F.col("inicio_anio")))
     semanales = casos_semanales(vigentes(previas, ["anio_canal"]), ["anio_canal"])
     totales = (semanales.groupBy("anio_canal", "dpa_provin", "anio_epi")
                .agg(F.count("*").alias("semanas"), F.sum("casos").alias("total"))
@@ -185,8 +196,8 @@ def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finale
                  .select("inicio_emision", "fecha_emision",
                          F.explode(F.array(F.col("anio_epi") - 1, F.col("anio_epi"))).alias("anio_epi"))
                  .join(gacetas_df, "anio_epi")
-                 .where((F.col("inicio_gaceta") <= F.col("inicio_emision"))     # de la SE t o anteriores
-                        & (F.col("fecha_corte") <= F.col("fecha_emision"))))    # y ya publicadas
+                 .where((F.col("inicio_gaceta") <= F.col("inicio_emision"))         # de la SE t o anteriores
+                        & (F.col("fecha_publicacion") <= F.col("fecha_emision"))))  # y ya publicadas
     serie = (casos_semanales(vigentes(conocidas, ["inicio_emision"]), ["inicio_emision"])
              .join(semanas_df.select("anio_epi", "semana_epi", "inicio_semana"), ["anio_epi", "semana_epi"])
              .join(ventana, ["inicio_emision", "inicio_semana"]))

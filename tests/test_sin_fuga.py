@@ -21,6 +21,8 @@ FALTAN = {("09", 2018, 10), ("13", 2018, 10), ("09", 2020, 20), ("09", 2020, 21)
 CORREGIDA = ("09", 2021, 30)   # su versión 2 sale 14 días después, con 10 casos más
 BAJA = ("13", 2017, 20)        # su acumulado sale 3 casos por debajo del de la semana anterior
 CON_EL_ANIO_ANTERIOR = 2022    # su gaceta de la SE 1 suma el acumulado de 2021, como la de la SE 1 de 2025
+TARDE = ("09", 2022, 20)       # su corte es el día en que cierra la semana, pero se publica 20 días después
+DIAS_TARDE = 20
 
 
 def semana_epi(fecha):
@@ -69,10 +71,12 @@ def construir_datos(spark):
             extra = 10 if clave == CORREGIDA[:2] and corte >= publicada else 0
             if anio == CON_EL_ANIO_ANTERIOR and semana == 1:
                 extra = ultimo[(provincia, anio - 1)]   # el Total suma el año anterior y la SE 1
-            gacetas.append((provincia, anio, semana, 1, corte, reportado + extra))
+            # Casi todas se publican el día de su corte; una, bastante después
+            en_linea = corte + dt.timedelta(days=DIAS_TARDE if (provincia, anio, semana) == TARDE else 0)
+            gacetas.append((provincia, anio, semana, 1, corte, en_linea, reportado + extra))
             ultimo[clave] = reportado + extra
     original = next(g for g in gacetas if g[:3] == CORREGIDA)
-    gacetas.append((*CORREGIDA, 2, publicada, original[5] + 10))
+    gacetas.append((*CORREGIDA, 2, publicada, publicada, original[6] + 10))
     clima, nino, poblacion = [], [], []
     for i, (anio, semana, inicio, _) in enumerate(semanas):
         onda = math.sin(2 * math.pi * (semana - 8) / 52)
@@ -85,7 +89,7 @@ def construir_datos(spark):
         "calendario": spark.createDataFrame(semanas, "anio_epi INT, semana_epi INT, inicio_semana DATE, "
                                                      "fin_semana DATE"),
         "gacetas": spark.createDataFrame(gacetas, "provincia STRING, anio INT, semana_epi INT, version INT, "
-                                                  "fecha_corte DATE, casos_acumulados BIGINT"),
+                                                  "fecha_corte DATE, fecha_publicacion DATE, casos_acumulados BIGINT"),
         "clima": spark.createDataFrame(clima, "dpa_provin STRING, anio_epi INT, semana_epi INT, inicio_semana DATE, "
                                               "lluvia_mm DOUBLE, temp_min DOUBLE, humedad DOUBLE"),
         "nino": spark.createDataFrame(nino, "anio_epi INT, semana_epi INT, inicio_semana DATE, nino12_anomalia DOUBLE"),
@@ -111,12 +115,15 @@ def con_el_futuro_cambiado(spark, d, corte):
     población de las semanas posteriores"""
     semana_posterior = ((F.col("anio") > corte.anio_epi)
                         | ((F.col("anio") == corte.anio_epi) & (F.col("semana_epi") > corte.semana_epi)))
-    no_se_sabia = semana_posterior | (F.col("fecha_corte") > F.lit(corte.fecha_emision))
+    no_se_sabia = semana_posterior | (F.col("fecha_publicacion") > F.lit(corte.fecha_emision))
     gacetas = d["gacetas"].withColumn(
         "casos_acumulados",
         F.when(no_se_sabia, F.col("casos_acumulados") * 7 + 13).otherwise(F.col("casos_acumulados")))
+    # La corrección tardía tiene su corte antes de la emisión, pero se publica un día después de ella: si las
+    # features miraran la fecha de corte y no la de publicación, entraría
     tardia = spark.createDataFrame(
-        [("09", corte.anio_epi, 10, 9, corte.fecha_emision + dt.timedelta(days=1), 999999)], d["gacetas"].schema)
+        [("09", corte.anio_epi, 10, 9, corte.fin_semana, corte.fecha_emision + dt.timedelta(days=1), 999999)],
+        d["gacetas"].schema)
     despues = F.col("inicio_semana") > F.lit(corte.fin_semana)
 
     def cambiar(df, columna, cambio):
@@ -211,6 +218,21 @@ def test_una_gaceta_corregida_cuenta_desde_que_se_publica(resultado):
     assert (final.casos, final.version) == (c30 + 10, 2)
 
 
+def test_una_gaceta_publicada_tarde_no_cuenta_hasta_que_se_publica(resultado):
+    c20, c21 = casos_reales(*TARDE), casos_reales("09", 2022, 21)
+    fila = {r.semana_epi: r for r in
+            resultado[2].where("dpa_provin = '09' AND anio_epi = 2022 AND semana_epi BETWEEN 20 AND 22").collect()}
+    # Al emitir la SE 20, 7 días después de su corte, el PDF todavía no está en línea: la semana queda sin dato
+    assert fila[20].casos_lag0 is None and fila[20].rezago_dato == 1
+    # Al emitir la SE 21 tampoco: la gaceta de la SE 21 reparte su crecimiento entre las dos semanas
+    reparto = round((c20 + c21) / 2, 2)
+    assert (fila[21].casos_lag0, fila[21].casos_lag1) == (reparto, reparto)
+    # Al emitir la SE 22, 21 días después del corte, ya se publicó: cada semana tiene sus casos
+    assert (fila[22].casos_lag1, fila[22].casos_lag2) == (c21, c20)
+    final = resultado[0].where("dpa_provin = '09' AND anio_epi = 2022 AND semana_epi = 20").first()
+    assert (final.fecha_publicacion - final.fecha_corte).days == DIAS_TARDE
+
+
 def test_el_canal_usa_anios_previos_sin_epidemias(resultado):
     canal = resultado[1]
     fila = canal.where("dpa_provin = '13' AND anio_epi = 2023 AND semana_epi = 20").first()
@@ -219,6 +241,24 @@ def test_el_canal_usa_anios_previos_sin_epidemias(resultado):
     assert fila.q1 <= fila.mediana <= fila.q3
     # Sin 5 años previos no hay canal: para 2020 solo están 2016 a 2019.
     assert canal.where("anio_epi = 2020").count() == 0
+
+
+def test_el_canal_no_usa_gacetas_publicadas_despues_de_que_empieza_el_anio(spark, datos, resultado):
+    semanas = ft.semanas(datos["calendario"])
+    inicio_2023 = semanas.where("anio_epi = 2023 AND semana_epi = 1").first().inicio_semana
+    de_manabi = "dpa_provin = '13' AND anio_epi = 2023"
+
+    def canal_de_2023(publicada):
+        """El canal de 2023 si la SE 40 de 2022 tuviera una corrección enorme, con corte en 2022"""
+        correccion = spark.createDataFrame(
+            [("13", 2022, 40, 2, inicio_2023 - dt.timedelta(days=30), publicada, 99999)], datos["gacetas"].schema)
+        gacetas = ft.gacetas(datos["gacetas"].unionByName(correccion), semanas)
+        return ft.canal_endemico(gacetas, semanas).where(de_manabi)
+
+    # Publicada cuando 2023 ya empezó: el canal de 2023 no la conoce, aunque su corte sea de 2022
+    assertDataFrameEqual(canal_de_2023(inicio_2023 + dt.timedelta(days=5)), resultado[1].where(de_manabi))
+    # La prueba solo vale si, publicada antes de que empiece el año, sí cambia el canal: 2022 pasa a ser epidémico
+    assert 2022 in canal_de_2023(inicio_2023 - dt.timedelta(days=5)).first().anios_epidemicos
 
 
 def test_los_objetivos_son_las_semanas_siguientes(resultado):
