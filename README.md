@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/srodriguez252/vigia-dengue/actions/workflows/ci.yml/badge.svg)](https://github.com/srodriguez252/vigia-dengue/actions/workflows/ci.yml)
 
-**With data up to 2023, Vigía Dengue would have issued a red alert for Manabí 22 weeks before the 2024 peak.**
+**Since March 2024, when the upload date of each new bulletin is known to the day, Vigía Dengue's red alert came before 23 of 29 outbreak onsets, a median of 6 weeks ahead. A 4-week average under the same rule caught 17.**
 
 Every Saturday it forecasts confirmed dengue cases in each of Ecuador's 24 provinces one to four weeks ahead, issues a green, yellow or red alert with its reason, and estimates the hospital bed-days those cases would take. It runs end to end on Databricks Free Edition.
 
-> **Resumen en español.** Sistema de alerta temprana de dengue para Ecuador sobre Databricks Free Edition. Cada sábado pronostica los casos confirmados de cada provincia a 1–4 semanas, emite una alerta verde, amarilla o roja con su motivo y estima las camas-día que ocuparían. Usa datos públicos del MSP, el INEC, Open-Meteo (ERA5 de Copernicus) y NOAA. Con datos hasta 2023, habría alertado a Manabí 22 semanas antes del pico de 2024.
+> **Resumen en español.** Sistema de alerta temprana de dengue para Ecuador sobre Databricks Free Edition. Cada sábado pronostica los casos confirmados de cada provincia a 1–4 semanas, emite una alerta verde, amarilla o roja con su motivo y estima las camas-día que ocuparían. Usa datos públicos del MSP, el INEC, Open-Meteo (ERA5 de Copernicus) y NOAA. Desde marzo de 2024, cuando la fecha de subida de cada gaceta nueva se conoce al día, la alerta roja se adelantó a 23 de 29 inicios de brote, con 6 semanas de mediana; el promedio de 4 semanas, con la misma regla, a 17.
 
 ## The problem
 
@@ -104,35 +104,40 @@ flowchart LR
 
 ## Results
 
-Rolling-origin backtest: one forecast per epidemiological week since week 1 of 2022, retraining every 4 weeks, with only the data published by each issue date.
+Rolling-origin backtest: one forecast per epidemiological week since week 1 of 2022, retraining every 4 weeks, with only the bulletins that were online at each issue date.
 
-**Forecast error.** Mean absolute error in cases per province and week. Every forecast cuts the endemic channel's error by 40% to 54%. The naive forecast, the average of the last 4 weeks, has the lowest error at every horizon, and the champion is within 1.2 cases of it. The champion's edge is that it anticipates rises, as the alert rules below show.
+**What each issue knew.** Only 31% of the weekly issues since 2022 had the bulletin of their own week. None did in 2022 and 2023, when the upload month is the only trace and a bulletin counts from the last day of that month; 65% did in 2025 and 75% in 2026. Since week 10 of 2024, when the upload date of each new bulletin is known to the day, 55% had it and 84% had data at most one week old. An earlier version of this backtest took each bulletin's cut-off date as its publication date and put that share at 92%; the results below replace the ones it gave.
+
+**Forecast error.** Mean absolute error in cases per province and week. Every forecast cuts the endemic channel's error by 20% to 46%. The two baselines without a model have the lowest error at every horizon: 14.0 and 14.1 cases on average, against 17.9 for the champion. With the cut-off date as publication date the gap was about one case, so the model depends on fresh bulletins more than the averages do.
 
 | Model | 1 week | 2 weeks | 3 weeks | 4 weeks | Relative to the endemic channel |
 | --- | --- | --- | --- | --- | --- |
-| Last 4 weeks (naive) | 9.8 | 11.2 | 12.5 | 14.0 | 0.46 |
-| **Gradient boosting, no weather (champion)** | 11.0 | 12.0 | 13.3 | 14.3 | 0.49 |
-| Gradient boosting, with weather and El Niño | 11.3 | 12.9 | 14.0 | 14.2 | 0.51 |
-| Gradient boosting, one model per province | 14.2 | 15.0 | 15.8 | 16.7 | 0.60 |
-| Endemic channel, median | 25.6 | 25.6 | 25.7 | 25.8 | 1.00 |
+| Last known week | 11.9 | 13.4 | 14.7 | 16.1 | 0.54 |
+| Last 4 weeks (naive) | 11.9 | 13.3 | 14.8 | 16.3 | 0.54 |
+| **Gradient boosting with weather and El Niño (champion)** | 17.1 | 17.4 | 17.8 | 19.4 | 0.69 |
+| Gradient boosting, no weather | 17.6 | 18.2 | 19.1 | 20.2 | 0.72 |
+| Gradient boosting, one model per province | 19.9 | 20.3 | 21.1 | 21.4 | 0.80 |
+| Endemic channel, median | 25.8 | 25.9 | 26.0 | 26.1 | 1.00 |
 
-**Alert rules,** applied to the champion's forecasts. Every rule turns red when the 2–4 week forecast is above the channel's third quartile in two consecutive issues; the stricter ones also ask the 4-week forecast to reach a multiple of the last 4 weeks' average.
+**Alerts.** An alert turns red when the 2–4 week forecast is above the channel's third quartile in two consecutive issues. It is measured against outbreak onsets: the first of 4 consecutive weeks in the epidemic zone after 8 calm weeks. A warning is in time when a red issue is published up to 8 weeks before the onset, and late when it comes in the 4 weeks after. A run of red issues is a false alarm when it starts in a calm week and no outbreak begins from 4 weeks before to 8 weeks after its publication.
 
-| Red alert rule | Sensitivity | False alarms per province-year | Coastal provinces warned in 2024 | Median coastal lead time (weeks) | Manabí |
+Issues since week 10 of 2024, with 29 onsets in 17 provinces between May 2024 and September 2026:
+
+| Forecast behind the alert | Warned in time | Warned late | Not warned | Median lead (weeks) | False alarms per province-year |
 | --- | --- | --- | --- | --- | --- |
-| Above the third quartile twice in a row (the plan's rule) | 0.89 | 0.33 | 2 of 7 | 0 | Red since week 22 of 2023 |
-| **Plus a 4-week forecast at least equal to the average (chosen)** | 0.33 | 0.20 | 5 of 7 | 12 | Warned 22 weeks ahead |
-| Plus a 4-week forecast at least 1.25 times the average | 0.17 | 0.17 | 5 of 7 | 8 | Warned 22 weeks ahead |
-| Plus a 4-week forecast at least 1.5 times the average | 0.08 | 0.13 | 4 of 7 | 11 | Not warned |
-| The plan's rule on the naive forecast | 0.86 | 0.26 | 2 of 7 | 0 | Red since week 20 of 2023 |
+| **Champion** | 23 | 5 | 1 | 6 | 0.48 |
+| Last 4 weeks (naive) | 17 | 5 | 7 | 7 | 0.31 |
+| Last known week | 14 | 11 | 4 | 7 | 0.33 |
 
-Sensitivity is the share of epidemic weeks that had a red alert issued 2 to 4 weeks earlier. A false alarm is a run of red issues that announced no epidemic week. Lead time counts the full weeks between the publication of the first red alert of the 2024 rise and the start of the peak week; a coastal province that was not warned, or whose alert was already red from the previous season, counts as 0.
+The champion misses 1 onset where the naive forecast misses 7, and raises about 55% more false alarms. Over the whole backtest, with 56 onsets since 2022, the champion and the naive forecast each warned 25 in time, with 0.39 and 0.34 false alarms per province and year: the champion's advantage shows only where the upload dates are exact. Stricter rules, which also ask the 4-week forecast to reach 1, 1.25 or 1.5 times the last 4 weeks' average, warned 20, 11 and 9 of the 29 onsets.
 
-With the chosen rule, Santo Domingo de los Tsáchilas was warned 24 weeks before its peak, Manabí 22, Esmeraldas 18, Guayas 12 and Santa Elena 9. El Oro and Los Ríos were already red from the previous season.
+**The 2024 epidemic on the coast.** The rise the project set out to catch would have been caught late, and the reason is in the bulletins. No bulletin sits in the upload folder of January 2024: those of the last two weeks of 2023 and the first eight of 2024 went up in February, two of them in November. From December to late February each issue worked with data 2 to 9 weeks old, and the provinces that were red in December fell back to yellow or green. Red came back with the bulletins: on 16 March in Santa Elena, 8 weeks before its peak, and in Los Ríos, after its peak; on 23 March in Santo Domingo, 3 weeks before; and on 13 April in Manabí, 6 weeks before, in Guayas, the day before its peak week began, and in El Oro, at its peak. Esmeraldas stayed red except for four issues in January and February.
 
 ![Weekly bulletin dashboard](docs/img/dashboard.png)
 
-![2024 backtest: week each coastal province would have turned red](docs/img/alerta_2024_costa.png)
+![The 2024 epidemic on the coast: weekly cases, epidemic threshold and the alert in force each week](docs/img/alerta_2024_costa.png)
+
+The panel titles count the weeks from the first red issue of the rise to the peak, even when that red did not last: Manabí's 24 weeks are two red issues in December 2023.
 
 ## Design decisions
 
@@ -141,18 +146,19 @@ With the chosen rule, Santo Domingo de los Tsáchilas was warned 24 weeks before
 - **Rates back to cases.** From mid-2025 to mid-2026 the bulletins publish rates only. They are converted with the population the MSP itself used, deduced from its earlier bulletins, and every row says whether its cases come from the PDF or are estimated.
 - **A bulletin that carries the previous year.** The total row of the bulletin for week 1 of 2025 adds all the cases of 2024 to the 547 of its own week. Weekly cases are the growth of each year's highest cumulative count, so that one bulletin gave Manabí 10,473 cases in the first week of 2025, about its whole 2024, and zero in the other 52 weeks. A bulletin from the first 4 weeks of a year is dropped when its national cumulative count reaches half of the previous year's highest count known at its cut-off date; its week is filled like any other gap, and a test reproduces the case.
 - **The endemic channel as the yardstick.** For each province, year and week: the quartiles of up to 7 previous non-epidemic years ([Bortman, 1999](https://scielosp.org/pdf/rpsp/1999.v5n1/1-8/es)). It is both the baseline to beat and the threshold of the alert.
-- **The model.** `HistGradientBoostingRegressor` with Poisson loss, one per horizon, shared by all provinces, with the province as a categorical feature. The backtest compared it with one model per province and with a version that adds rainfall, temperature and humidity anomalies and the lagged Niño 1+2 index. The champion is the global model with the lower mean error, the one without weather: it uses lagged cases and their growth, incidence per 100,000, the endemic channel, data-quality flags, season and population. The naive forecast and the endemic channel are baselines only, because neither can announce an epidemic rise.
-- **The alert rule.** Red when, in two consecutive weekly issues, the 2–4 week forecast is above the channel's third quartile (and above 5 cases) and the 4-week forecast is at least the average of the last 4 weeks. Yellow when the forecast is above the channel's median. The backtest chose the rising-forecast condition: the most coastal lead time with at most one false alarm per province and year.
+- **The model.** `HistGradientBoostingRegressor` with Poisson loss, one per horizon, shared by all provinces, with the province as a categorical feature. It uses lagged cases and their growth, incidence per 100,000, the endemic channel, data-quality flags, season, population, rainfall, temperature and humidity anomalies and the lagged Niño 1+2 index. The backtest compared it with the same model without weather and with one model per province; the champion is the global model with the lower mean error. Three baselines without a model go through the same backtest and the same alert rules: the endemic channel, the average of the last 4 weeks and the last known week.
+- **The alert rule.** Red when, in two consecutive weekly issues, the 2–4 week forecast is above the channel's third quartile (and above 5 cases). Yellow when the forecast is above the channel's median. Asking also for a rising 4-week forecast warned fewer outbreak onsets and no earlier on the coast in 2024, so the plain rule stays.
 - **Bed-days.** Forecast cases × hospitalizations per case × mean length of stay, from INEC discharges and MSP cases of 2017–2024. Provinces with fewer than 30 hospitalizations use national rates.
 - **Append-only weekly issues.** Each run forecasts only the issues not yet in `gold.pronosticos`, so a failed Saturday is made up the next week and past issues are never rewritten. The 80% interval comes from the backtest errors of the champion.
 
 ## Limitations
 
-- **The model does not beat the naive forecast on error.** The average of the last 4 weeks misses by 9.8 cases a week ahead, against 11.0 for the champion, and stays ahead at every horizon. But it is flat, so it can never announce a rise: its 4-week forecast is the average itself, and the rising-forecast condition either always holds or never does. With the plan's rule it warned 2 of 7 coastal provinces of the 2024 rise, with a median lead time of 0 weeks; the champion with the chosen rule warned 5, with 12.
-- **Weather did not improve the forecast.** With weather and El Niño the error moved by less than one case per province and week: slightly higher at 1 to 3 weeks and slightly lower at 4 (14.2 against 14.3). The champion therefore uses case history and the endemic channel only. The rainfall bias below and a history that starts in 2017 may explain part of it.
+- **The model does not beat the baselines on error.** The last known week and the 4-week average miss by 14.0 and 14.1 cases on average and the champion by 17.9, and it trails at every horizon. What it adds is in the alerts: since March 2024 it warned 23 of 29 outbreak onsets in time against 17, at the price of 0.48 false alarms per province and year against 0.31.
+- **It learned from stale history.** Under the dates the backtest uses, no issue of 2022 or 2023 had the bulletin of its own week, and the lag features are tied to fixed weeks, so they are empty when a bulletin is late. That is the likely reason the model forecasts too low when cases are high: Manabí stayed green through March 2024 with 250 to 330 cases a week.
+- **Weather adds little.** With rainfall, temperature, humidity and El Niño the error is 17.9 cases against 18.8 without, about 5% less. The rainfall bias below and a history that starts in 2017 may explain part of it.
 - **Rainfall is biased in the Andes.** ERA5 cells of about 28 km mix valleys and slopes: Quito adds up to 3,518 mm in 2025 against a normal of about 1,100 mm. That is why rainfall enters the model as an anomaly against its own climatology.
-- **The chosen rule trades sensitivity for timing.** It catches 33% of epidemic weeks 2 to 4 weeks ahead, against 89% for the plan's rule, because it only turns red on a rising forecast. That condition is what lets it warn 5 of 7 coastal provinces of the 2024 rise instead of 2.
-- **Saturated alerts.** Manabí's cases were above its epidemic threshold every week from week 21 of 2023 to the end of 2024 (84 weeks), and with the plan's rule its alert stayed red from week 22 of 2023. A province already in red cannot be warned again, so lead time is measured from the 2024 rise.
+- **The epidemic zone is the usual state.** 45% of the province-weeks since 2022 are above the channel's third quartile, 64% on the coast, and Manabí stayed above it for 123 weeks in a row, from week 21 of 2023 to week 39 of 2025. A red alert says cases are above the province's history, not that an outbreak is starting, and a province already in red cannot be warned again. That is why alerts are measured against outbreak onsets, the passage from calm to epidemic.
+- **The onset measure is new and small.** Its thresholds were set before looking at its results but have not been validated on other data, and the 29 onsets since March 2024 are 2 of 2024, 9 of 2025 and 18 of 2026.
 - **The bulletins have gaps.** From 2017 to 2026, 21 weeks were never posted, 3 links are broken and 4 PDFs cannot be read, and figures are revised in later bulletins. The growth across a gap is spread evenly over its weeks.
 - **Publication dates are exact only since March 2024.** Bulletins uploaded since then keep their original server date, and it always falls in the month of their URL folder. Every earlier file shows the same bulk re-upload of 2 March 2024, so the folder is the only trace: those bulletins count from the last day of their upload month, up to a month after the real upload, and the ones of 2017–2019 with no usable trace still count from their cut-off date. `publicacion_origen` marks each case, and `publicacion_desde` keeps the earliest possible date, to rerun the backtest at the other end of the range.
 - **Hospital data arrive late.** INEC discharges are published more than a year later, so they calibrate bed-days but do not feed the weekly forecast. Bed-days are an order of magnitude, not a capacity plan.
