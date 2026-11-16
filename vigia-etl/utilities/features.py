@@ -10,7 +10,9 @@ usa lo que ya se sabía ese día:
 - el canal endémico y lo normal del clima, hechos con años anteriores
 
 Una gaceta se conoce desde su fecha_publicacion (utilities/publicacion.py), no desde su fecha de corte: el corte
-dice hasta cuándo cuentan los datos, y el PDF puede subirse semanas después
+dice hasta cuándo cuentan los datos, y el PDF puede subirse semanas después. Por eso la fila guarda los casos de dos
+maneras: por semana fija (casos_lag0 es la SE t, y queda vacío si su gaceta no llegó) y desde el último dato conocido
+(casos_ult0 es la semana más reciente con dato, y rezago_dato dice cuántas semanas tiene)
 """
 import math
 
@@ -178,7 +180,12 @@ def normales_clima(clima):
 
 
 def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finales, provincias):
-    """Una fila por provincia y SE de emisión t: lo que se sabía al emitir y, aparte, los casos de t+1 a t+4"""
+    """Una fila por provincia y SE de emisión t: lo que se sabía al emitir y, aparte, los casos de t+1 a t+4
+
+    casos_ventana guarda lo que la emisión sabía de sus últimas SEMANAS_ATRAS semanas, de la SE t hacia atrás, con
+    nulo donde no había dato. De ahí salen los casos_ult (las semanas conocidas más recientes) y, en el modelo,
+    las etiquetas: los casos de una semana como se conocían en una emisión posterior
+    """
     emisiones = (semanas_df.select("anio_epi", "semana_epi", F.col("inicio_semana").alias("inicio_emision"),
                                    "fecha_emision")
                  .crossJoin(gacetas_df.agg(F.min("inicio_gaceta").alias("desde")))
@@ -203,6 +210,8 @@ def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finale
              .join(ventana, ["inicio_emision", "inicio_semana"]))
     casos = (serie.groupBy("dpa_provin", "inicio_emision")
              .agg(*[F.max(F.when(F.col("k") == k, F.col("casos"))).alias(f"casos_lag{k}") for k in range(4)],
+                  F.array(*[F.round(F.max(F.when(F.col("k") == k, F.col("casos"))), 2)
+                            for k in range(SEMANAS_ATRAS)]).alias("casos_ventana"),
                   F.avg(F.when(F.col("k") <= 3, F.col("casos"))).alias("media_4s"),
                   F.avg(F.when(F.col("k").between(4, 7), F.col("casos"))).alias("media_4s_previas"),
                   F.avg("casos").alias("media_12s"),
@@ -261,6 +270,14 @@ def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finale
              .join(objetivos, ["dpa_provin", "inicio_emision"], "left")
              .join(provincias, "dpa_provin", "left"))
     angulo = 2 * math.pi * F.col("semana_epi") / 52.18
+    # Las semanas con dato de la ventana, de la más reciente a la más antigua, y el promedio de 4 de ellas
+    conocidas = F.filter("casos_ventana", lambda casos: casos.isNotNull())
+
+    def media_conocidas(desde):
+        tramo = F.slice(conocidas, desde, 4)
+        return F.try_divide(F.aggregate(tramo, F.lit(0.0), lambda suma, casos: suma + casos), F.size(tramo))
+
+    ultimas_4, las_4_previas = media_conocidas(1), media_conocidas(5)
     return tabla.select(
         "dpa_provin", "provincia", "anio_epi", "semana_epi", F.col("inicio_emision").alias("inicio_semana"),
         "fecha_emision",
@@ -272,6 +289,12 @@ def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finale
         "semanas_con_dato", "rezago_dato",
         "canal_mediana", "canal_q3",
         F.round(F.log((F.col("media_4s") + 1) / (F.col("canal_mediana") + 1)), 3).alias("casos_vs_canal"),
+        *[F.get(conocidas, k).alias(f"casos_ult{k}") for k in range(4)],
+        F.round(ultimas_4, 2).alias("casos_media_ult4"),
+        F.round(F.log((ultimas_4 + 1) / (las_4_previas + 1)), 3).alias("crecimiento_ult4"),
+        F.round(ultimas_4 / F.col("poblacion") * 100000, 3).alias("incidencia_ult4_100k"),
+        F.round(F.log((ultimas_4 + 1) / (F.col("canal_mediana") + 1)), 3).alias("casos_ult_vs_canal"),
+        "casos_ventana",
         *[F.round(f"anomalia_lluvia_{d}_{h}", 3).alias(f"anomalia_lluvia_{d}_{h}") for d, h in TRAMOS],
         *[F.round(f"anomalia_temp_min_{d}_{h}", 2).alias(f"anomalia_temp_min_{d}_{h}") for d, h in TRAMOS],
         F.round("anomalia_humedad_0_3", 1).alias("anomalia_humedad_0_3"),

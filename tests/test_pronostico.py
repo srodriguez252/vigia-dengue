@@ -43,9 +43,14 @@ def features_de_prueba():
                         canal_mediana=nivel if anios[i] >= 2020 else np.nan,
                         canal_q3=1.5 * nivel if anios[i] >= 2020 else np.nan)
             fila.update({f"casos_lag{k}": lags[k] for k in range(4)})
+            # En estos datos cada gaceta llega a tiempo: el último dato conocido es el de la semana emitida
+            fila.update({f"casos_ult{k}": lags[k] for k in range(4)})
+            fila["casos_ventana"] = [sabido[i - k] if i >= k else np.nan for k in range(P.SEMANAS_VENTANA)]
             fila.update({v: rng.normal() for v in P.VARIABLES_CLIMA})
             fila.update(crecimiento_4s=rng.normal(), incidencia_4s_100k=fila["casos_media_4s"] / poblacion * 1e5,
                         casos_vs_canal=rng.normal())
+            fila.update(casos_media_ult4=fila["casos_media_4s"], crecimiento_ult4=fila["crecimiento_4s"],
+                        incidencia_ult4_100k=fila["incidencia_4s_100k"], casos_ult_vs_canal=fila["casos_vs_canal"])
             fila.update({f"y_h{h}": casos[i + h] if i + h < n else np.nan for h in P.HORIZONTES})
             filas.append(fila)
     return pd.DataFrame(filas)
@@ -65,6 +70,9 @@ def cambiar_lo_que_no_se_sabia(features, corte):
     despues = f["inicio_semana"] > corte
     numericas = [c for c in P.VARIABLES if c != "provincia_codigo"]
     f.loc[despues, numericas] = rng.uniform(0, 500, (despues.sum(), len(numericas)))
+    # También lo que esas emisiones sabían de sus últimas semanas: de ahí salen las etiquetas
+    f.loc[despues, "casos_ventana"] = pd.Series(
+        [list(rng.uniform(0, 500, P.SEMANAS_VENTANA)) for _ in range(despues.sum())], index=f.index[despues])
     f[P.OBJETIVOS] = rng.uniform(0, 500, (len(f), len(P.OBJETIVOS)))
     return f
 
@@ -82,19 +90,33 @@ def test_el_backtest_no_usa_nada_que_no_se_conociera_al_emitir(cada):
     assert not tal_cual[~hasta_el_corte].equals(cambiado[~hasta_el_corte])   # después del corte sí cambian
 
 
-def test_las_etiquetas_son_lo_que_se_sabia_tres_semanas_despues():
-    f = P.preparar(features_de_prueba())
-    g = f[f["dpa_provin"] == "13"].set_index("inicio_semana")
-    t = pd.Timestamp("2021-03-07")
+def test_las_etiquetas_son_lo_que_se_sabia_al_entrenar():
+    features = features_de_prueba()
+    datos = P.entrenamiento(P.preparar(features), CORTE)
+    g = datos[datos["dpa_provin"] == "13"].set_index("inicio_semana")
+    ventana = features[features["dpa_provin"] == "13"].set_index("inicio_semana")["casos_ventana"]
+    reciente, antigua = CORTE - 6 * P.SEMANA, CORTE - 30 * P.SEMANA
     for h in P.HORIZONTES:
-        assert g.loc[t, f"e_h{h}"] == g.loc[t + (h + 3) * P.SEMANA, "casos_lag3"]
+        # Fila reciente: su SE t+h, como la conocía la emisión en que se entrena, 6 - h semanas después
+        assert g.loc[reciente, f"e_h{h}"] == ventana[CORTE][6 - h]
+        # Fila antigua: como la conocía la última emisión que todavía la tenía en su ventana, 11 semanas después
+        assert g.loc[antigua, f"e_h{h}"] == ventana[antigua + (h + 11) * P.SEMANA][11]
 
 
-def test_se_entrena_solo_con_etiquetas_que_ya_se_conocian():
-    f = P.preparar(features_de_prueba())
-    datos = P.entrenamiento(f, CORTE)
-    assert datos["inicio_semana"].max() == CORTE - 7 * P.SEMANA   # la etiqueta a 4 semanas se conoce en t+7
+def test_se_entrena_solo_con_lo_que_ya_se_conocia():
+    features = features_de_prueba()
+    datos = P.entrenamiento(P.preparar(features), CORTE)
+    assert datos["inicio_semana"].max() == CORTE - 4 * P.SEMANA   # su SE t+4 es la del origen, que ya tenía dato
     assert datos[P.ETIQUETAS].notna().all().all()
+    # Si al entrenar no han llegado las gacetas de las dos últimas semanas, las filas que las pronostican esperan
+    tarde = features.copy()
+    del_origen = tarde["inicio_semana"] == CORTE
+    tarde.loc[del_origen, "casos_ventana"] = tarde.loc[del_origen, "casos_ventana"].map(
+        lambda v: [np.nan, np.nan] + list(v[2:]))
+    datos = P.entrenamiento(P.preparar(tarde), CORTE)
+    assert datos["inicio_semana"].max() == CORTE - 6 * P.SEMANA
+    # ...y entran en cuanto llegan: una semana después ya tienen su dato en la ventana de la emisión siguiente
+    assert P.entrenamiento(P.preparar(tarde), CORTE + P.SEMANA)["inicio_semana"].max() == CORTE - 3 * P.SEMANA
 
 
 def test_la_linea_base_del_canal_usa_el_canal_que_ya_se_conocia():

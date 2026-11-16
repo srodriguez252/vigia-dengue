@@ -224,11 +224,15 @@ def test_una_gaceta_publicada_tarde_no_cuenta_hasta_que_se_publica(resultado):
             resultado[2].where("dpa_provin = '09' AND anio_epi = 2022 AND semana_epi BETWEEN 20 AND 22").collect()}
     # Al emitir la SE 20, 7 días después de su corte, el PDF todavía no está en línea: la semana queda sin dato
     assert fila[20].casos_lag0 is None and fila[20].rezago_dato == 1
+    # Lo que ve el modelo no queda vacío: el último dato conocido es el de la SE 19, y tiene una semana
+    c19 = casos_reales("09", 2022, 19)
+    assert fila[20].casos_ult0 == c19 and fila[20].casos_ventana[:2] == [None, c19]
     # Al emitir la SE 21 tampoco: la gaceta de la SE 21 reparte su crecimiento entre las dos semanas
     reparto = round((c20 + c21) / 2, 2)
     assert (fila[21].casos_lag0, fila[21].casos_lag1) == (reparto, reparto)
     # Al emitir la SE 22, 21 días después del corte, ya se publicó: cada semana tiene sus casos
     assert (fila[22].casos_lag1, fila[22].casos_lag2) == (c21, c20)
+    assert fila[22].casos_ult0 == fila[22].casos_lag0 and fila[22].casos_ventana[1:3] == [c21, c20]
     final = resultado[0].where("dpa_provin = '09' AND anio_epi = 2022 AND semana_epi = 20").first()
     assert (final.fecha_publicacion - final.fecha_corte).days == DIAS_TARDE
 

@@ -4,7 +4,7 @@ Usa pandas y scikit-learn, sin Spark ni MLflow: lo importan los notebooks de la 
 
 La regla de la Fase 4 sigue mandando: para pronosticar la emisión t solo se usan filas de features emitidas hasta t.
 Por eso el modelo no aprende de los casos finales (y_h1 a y_h4), que se conocen mucho después, sino de lo que se
-sabía de cada semana 3 semanas más tarde. Los casos finales solo sirven para evaluar
+sabía de cada semana el día en que se entrena. Los casos finales solo sirven para evaluar
 """
 import numpy as np
 import pandas as pd
@@ -12,7 +12,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
 HORIZONTES = (1, 2, 3, 4)
-SEMANAS_ETIQUETA = 3     # la etiqueta de la SE w es lo que se sabía de ella al emitir la SE w+3
+SEMANAS_VENTANA = 12     # cada emisión guarda lo que sabía de sus últimas 12 semanas (casos_ventana)
 PISO = 5                 # con menos de 5 casos por semana no hay zona de alerta ni de epidemia
 COSTA = {"07": "El Oro", "08": "Esmeraldas", "09": "Guayas", "12": "Los Ríos", "13": "Manabí",
          "23": "Santo Domingo", "24": "Santa Elena"}
@@ -21,15 +21,19 @@ SEMANA = pd.Timedelta(weeks=1)
 SEMANAS_POR_ANIO = 52.18
 
 VARIABLES_FIJAS = ["provincia_codigo", "poblacion", "estacion_sin", "estacion_cos"]
-VARIABLES_CASOS = ["casos_lag0", "casos_lag1", "casos_lag2", "casos_lag3", "casos_media_4s", "casos_media_12s",
-                   "crecimiento_4s", "incidencia_4s_100k", "semanas_con_dato", "rezago_dato",
-                   "canal_mediana", "canal_q3", "casos_vs_canal"]
+# Los casos entran desde el último dato conocido (casos_ult0 es la semana más reciente con dato) y rezago_dato dice
+# cuántas semanas tiene: así el modelo no se queda sin nivel de referencia cuando una gaceta se publica tarde
+VARIABLES_CASOS = ["casos_ult0", "casos_ult1", "casos_ult2", "casos_ult3", "casos_media_ult4", "casos_media_12s",
+                   "crecimiento_ult4", "incidencia_ult4_100k", "semanas_con_dato", "rezago_dato",
+                   "canal_mediana", "canal_q3", "casos_ult_vs_canal"]
+# Los casos por semana fija, que usan las líneas base y la regla de alerta, no el modelo
+REFERENCIA = ["casos_lag0", "casos_lag1", "casos_lag2", "casos_lag3", "casos_media_4s"]
 VARIABLES_CLIMA = ["anomalia_lluvia_0_3", "anomalia_lluvia_4_7", "anomalia_lluvia_8_11",
                    "anomalia_temp_min_0_3", "anomalia_temp_min_4_7", "anomalia_temp_min_8_11",
                    "anomalia_humedad_0_3", "temp_min_0_3",
                    "nino12_lag0", "nino12_lag4", "nino12_lag8", "nino12_lag12"]
 VARIABLES = VARIABLES_FIJAS + VARIABLES_CASOS + VARIABLES_CLIMA
-ETIQUETAS = [f"e_h{h}" for h in HORIZONTES]     # para entrenar: lo que se sabía 3 semanas después
+ETIQUETAS = [f"e_h{h}" for h in HORIZONTES]     # para entrenar: lo que se sabía el día del entrenamiento
 OBJETIVOS = [f"y_h{h}" for h in HORIZONTES]     # para evaluar: los casos finales
 FECHAS = ["inicio_semana", "fecha_emision", "emision", "objetivo", "origen", "pico", "valle", "primera_roja",
           "roja_desde", "inicio", "publicada"]
@@ -67,28 +71,49 @@ def calendario(semanas):
 
 
 def preparar(features):
-    """La tabla de features lista para el modelo: fechas, tipos, la provincia como código y las etiquetas.
+    """La tabla de features lista para el modelo: fechas, tipos, la provincia como código y lo que sirve para
+    armar las etiquetas
 
-    La etiqueta e_h de la fila de la SE t son los casos de la SE t+h como se conocían al emitir la SE t+h+3, o sea,
-    el casos_lag3 de esa fila. Se conoce recién en esa emisión: `entrenamiento` la usa solo desde entonces
+    Las etiquetas dependen del día en que se entrena, así que las arma `entrenamiento`. Aquí queda, para la fila de
+    la SE t y cada horizonte h, lo que supo de la SE t+h cada emisión que la tuvo en su ventana: la columna
+    _s{h}_{k} son los casos de la SE t+h como los conocía la emisión t+h+k (su casos_ventana[k])
     """
-    f = de_spark(features)
+    f = de_spark(features).sort_values(["dpa_provin", "inicio_semana"], ignore_index=True)
     f["provincia_codigo"] = f["dpa_provin"].astype("int64")
-    numericas = [c for c in VARIABLES + OBJETIVOS if c != "provincia_codigo"]
+    numericas = [c for c in VARIABLES + REFERENCIA + OBJETIVOS if c != "provincia_codigo"]
     f[numericas] = f[numericas].astype("float64")
     f = f.astype({"anio_epi": "int64", "semana_epi": "int64"})
-    sabido = f[["dpa_provin", "inicio_semana", "casos_lag3"]]
+    sin_dato = np.full(SEMANAS_VENTANA, np.nan)
+    ventana = np.array([sin_dato if v is None or np.ndim(v) == 0 else np.asarray(v, dtype="float64")
+                        for v in f["casos_ventana"]])
+    claves = f[["dpa_provin", "inicio_semana"]]
+    sabido = claves.join(pd.DataFrame(ventana, index=f.index))      # columna k: lo que la emisión sabía de t-k
+    partes = [f.drop(columns="casos_ventana")]
     for h in HORIZONTES:
-        etiqueta = sabido.assign(inicio_semana=sabido["inicio_semana"] - (h + SEMANAS_ETIQUETA) * SEMANA)
-        f = f.merge(etiqueta.rename(columns={"casos_lag3": f"e_h{h}"}), on=["dpa_provin", "inicio_semana"],
-                    how="left")
-    return f.sort_values(["dpa_provin", "inicio_semana"], ignore_index=True)
+        for k in range(SEMANAS_VENTANA):
+            emision = sabido[["dpa_provin", "inicio_semana", k]].assign(
+                inicio_semana=sabido["inicio_semana"] - (h + k) * SEMANA)
+            partes.append(claves.merge(emision, on=["dpa_provin", "inicio_semana"], how="left")[k]
+                          .rename(f"_s{h}_{k}"))
+    return pd.concat(partes, axis=1)
 
 
 def entrenamiento(f, origen):
-    """Las filas para entrenar en la emisión `origen`: las que ya tenían sus 4 etiquetas ese día"""
-    ultima = pd.Timestamp(origen) - (max(HORIZONTES) + SEMANAS_ETIQUETA) * SEMANA
-    return f[f["inicio_semana"] <= ultima].dropna(subset=ETIQUETAS)
+    """Las filas para entrenar en la emisión `origen`, con sus etiquetas como se conocían ese día
+
+    La etiqueta e_h de la fila de la SE t son los casos de la SE t+h según la emisión más reciente que la tenía en
+    su ventana sin pasar de `origen`: la del origen para las semanas recientes, y la de SEMANAS_VENTANA - 1 semanas
+    después para las antiguas. Una fila entra solo si sus 4 semanas ya tenían dato: si las gacetas llegan tarde,
+    las filas más recientes esperan, pero ninguna queda fuera para siempre
+    """
+    origen = pd.Timestamp(origen)
+    d = f[f["inicio_semana"] <= origen - max(HORIZONTES) * SEMANA].copy()
+    semanas_antes = ((origen - d["inicio_semana"]) / SEMANA).round().astype("int64").to_numpy()
+    filas = np.arange(len(d))
+    for h in HORIZONTES:
+        k = np.minimum(semanas_antes - h, SEMANAS_VENTANA - 1)
+        d[f"e_h{h}"] = d[[f"_s{h}_{j}" for j in range(SEMANAS_VENTANA)]].to_numpy()[filas, k]
+    return d.dropna(subset=ETIQUETAS)
 
 
 def nuevo_modelo(variables=VARIABLES, **cambios):
