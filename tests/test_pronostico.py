@@ -284,6 +284,14 @@ def test_avisos_de_inicio_y_falsas_alarmas():
     assert aviso([49])[1]["falsas_inicio"] == 0
 
 
+def test_la_regla_elegida_es_la_que_avisa_mas_inicios_de_brote():
+    reglas = pd.DataFrame({"inicios_a_tiempo": [36, 16, 36, 40], "falsas_inicio_por_anio": [0.49, 0.36, 0.60, 1.20]},
+                          index=["plan", "con subida", "plan con más falsas", "fuera del presupuesto"])
+    assert P.elegir_regla(reglas, presupuesto=1.0) == "plan"            # si empatan, la de menos falsas alarmas
+    assert P.elegir_regla(reglas, presupuesto=2.0) == "fuera del presupuesto"
+    assert P.elegir_regla(reglas, presupuesto=0.1) == "con subida"      # ninguna cumple: la de menos falsas alarmas
+
+
 def test_el_grafico_tiene_un_panel_por_provincia_de_la_costa():
     pytest.importorskip("matplotlib")
     serie, b = serie_y_rojas(P.COSTA, pd.Timestamp("2024-01-14"))

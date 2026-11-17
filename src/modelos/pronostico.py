@@ -516,12 +516,16 @@ def resumen_regla(b, base, serie, anio=2024):
 
 
 def elegir_regla(reglas, presupuesto=1.0):
-    """La regla con más anticipación en la Costa entre las que no pasan `presupuesto` falsas alarmas por provincia
-    y año; si empatan, la de más sensibilidad. Si ninguna cumple, la de menos falsas alarmas"""
-    dentro = reglas[reglas["falsas_por_anio"] <= presupuesto]
+    """La regla que avisa a tiempo más inicios de brote entre las que no pasan `presupuesto` falsas alarmas por
+    provincia y año; si empatan, la de menos falsas alarmas. Si ninguna cumple, la de menos falsas alarmas
+
+    Antes elegía por la anticipación al pico de 2024 en la Costa, que mide una sola temporada en 7 provincias y da
+    crédito a rojas que no duran. Los inicios de brote cubren todas las provincias y todos los años del backtest
+    """
+    dentro = reglas[reglas["falsas_inicio_por_anio"] <= presupuesto]
     if dentro.empty:
-        return reglas.sort_values(["falsas_por_anio", "sensibilidad"], ascending=[True, False]).index[0]
-    return dentro.sort_values(["anticipacion_costa", "sensibilidad"], ascending=False).index[0]
+        return reglas.sort_values(["falsas_inicio_por_anio", "inicios_a_tiempo"], ascending=[True, False]).index[0]
+    return dentro.sort_values(["inicios_a_tiempo", "falsas_inicio_por_anio"], ascending=[False, True]).index[0]
 
 
 def tabla_resumen(error, reglas):
