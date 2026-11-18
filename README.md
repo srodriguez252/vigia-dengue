@@ -82,7 +82,7 @@ The job's six tasks, and how a change reaches them:
 flowchart LR
     subgraph CI["GitHub Actions, every push"]
         direction LR
-        T["pytest<br/>42 tests"] --> D["bundle validate,<br/>plan and deploy<br/>(main only)"] --> W[("Pipeline, job and<br/>dashboard in prod")]
+        T["pytest<br/>57 tests"] --> D["bundle validate,<br/>plan and deploy<br/>(main only)"] --> W[("Pipeline, job and<br/>dashboard in prod")]
     end
     subgraph JOB["Job vigia-semanal, Saturdays 08:00 (Ecuador)"]
         direction LR
@@ -100,7 +100,7 @@ flowchart LR
 - **ETL.** One Lakeflow Spark Declarative Pipeline (`vigia-etl`, 20 source files) builds the bronze, silver and gold tables, with expectations that drop bad rows or stop the update.
 - **Model.** A gradient boosting model, chosen by a rolling-origin backtest and registered in Unity Catalog through MLflow.
 - **Weekly run.** A six-task job forecasts the weeks still missing, applies the alert rule, estimates bed-days and emails the dashboard as a PDF.
-- **Operations.** The pipeline, the job and the dashboard are code in a Declarative Automation Bundle. GitHub Actions runs 42 tests on every push and deploys the bundle when they pass on `main`.
+- **Operations.** The pipeline, the job and the dashboard are code in a Declarative Automation Bundle. GitHub Actions runs 57 tests on every push and deploys the bundle when they pass on `main`.
 
 ## Results
 
@@ -142,14 +142,15 @@ The panel titles count the weeks to the peak from the first red issue of the ris
 ## Design decisions
 
 - **No look-ahead.** Each MSP bulletin is stored as a version with its cut-off date and the date it can be shown to have been online. The Ministry does not publish upload dates, and many bulletins went up weeks after their cut-off, several at a time, so the publication date comes from three traces: the server's `Last-Modified` header, the upload-month folder in the URL, and the first weekly run that saw the link. A bulletin counts from the latest date those traces allow. The features of week *t*, issued 7 days after the week closed, use only the bulletins already published that day, and the model trains on the case counts as they were known on the training day. Two tests perturb everything that was not known on a given date and require identical features and forecasts.
-- **A PDF parser that quarantines instead of guessing.** pdfplumber runs inside `mapInPandas` and reads five table layouts from 2017 to 2026 by the position of each number. A bulletin it cannot read with confidence goes to a quarantine table, and every bulletin with a total row is reconciled against it.
+- **A PDF parser that quarantines instead of guessing.** pdfplumber runs inside `mapInPandas` and reads five table layouts from 2017 to 2026 by the position of each number. A bulletin it cannot read with confidence goes to a quarantine table, and every bulletin with a total row is reconciled against it. Its tests build minimal PDFs with the layout of a bulletin and give them to the code the pipeline runs, so no bulletin is stored in the repository.
 - **Rates back to cases.** From mid-2025 to mid-2026 the bulletins publish rates only. They are converted with the population the MSP itself used, deduced from its earlier bulletins, and every row says whether its cases come from the PDF or are estimated.
 - **A bulletin that carries the previous year.** The total row of the bulletin for week 1 of 2025 adds all the cases of 2024 to the 547 of its own week. Weekly cases are the growth of each year's highest cumulative count, so that one bulletin gave Manabí 10,473 cases in the first week of 2025, about its whole 2024, and zero in the other 52 weeks. A bulletin from the first 4 weeks of a year is dropped when its national cumulative count reaches half of the previous year's highest count known at its cut-off date; its week is filled like any other gap, and a test reproduces the case.
 - **The endemic channel as the yardstick.** For each province, year and week: the quartiles of up to 7 previous non-epidemic years ([Bortman, 1999](https://scielosp.org/pdf/rpsp/1999.v5n1/1-8/es)). It is both the baseline to beat and the threshold of the alert.
 - **The model.** `HistGradientBoostingRegressor` with Poisson loss, one per horizon, shared by all provinces, with the province as a categorical feature. Cases enter from the last week that has data, together with how old that week is, so a late bulletin does not leave the model without a level. It also uses their growth, incidence per 100,000, the endemic channel, data-quality flags, season, population, rainfall, temperature and humidity anomalies and the lagged Niño 1+2 index. The backtest compared it with the same model without weather and with one model per province; the champion is the global model with the lower mean error. Three baselines without a model go through the same backtest and the same alert rules: the endemic channel, the average of the last 4 weeks and the last known week.
 - **The alert rule.** Red when, in two consecutive weekly issues, the 2–4 week forecast is above the channel's third quartile (and above 5 cases). Yellow when the forecast is above the channel's median. The backtest keeps the rule that warns the most outbreak onsets in time within a budget of one false alarm per province and year: asking also for a rising 4-week forecast warned 16 of 56 instead of 36.
 - **Bed-days.** Forecast cases × hospitalizations per case × mean length of stay, from INEC discharges and MSP cases of 2017–2024. Provinces with fewer than 30 hospitalizations use national rates.
-- **Append-only weekly issues.** Each run forecasts only the issues not yet in `gold.pronosticos`, so a failed Saturday is made up the next week and past issues are never rewritten. The 80% interval comes from the backtest errors of the champion.
+- **Append-only weekly issues.** Each run forecasts only the issues not yet in `gold.pronosticos` and writes them with a `MERGE` on their key, so a failed Saturday is made up the next week, a task that runs twice adds nothing and past issues are never rewritten. The 80% interval comes from the backtest errors of the champion.
+- **Failures that speak up.** The bulletin goes out even when a download fails, and someone hears about it. Every issue due that day gets its features, with the weather left empty if it did not arrive. A download task fails, and sends its email, when this week's weather is incomplete, when the bulletin page cannot be read or when no new bulletin has come out in more than 3 weeks. The forecast task fails if the issue due that day was not written, instead of emailing last week's bulletin.
 
 ## Limitations
 
@@ -170,12 +171,12 @@ The panel titles count the weeks to the peak from the first red issue of the ris
 | --- | --- |
 | `vigia-etl/transformations/` | Lakeflow pipeline: bronze, silver and gold tables |
 | `vigia-etl/utilities/` | Weekly cases, endemic channel and features (`features.py`) and the publication date of each bulletin (`publicacion.py`), shared by the pipeline and the tests |
-| `src/modelos/` | Backtest, baselines, alert rule and metrics (`pronostico.py`); weekly forecast, interval and bed-days (`semanal.py`) |
+| `src/modelos/` | Backtest, baselines, alert rule and metrics (`pronostico.py`); weekly forecast, interval and bed-days (`semanal.py`); writing the weekly tables by key (`tablas.py`) |
 | `src/notebooks/` | Downloads, backtest, model registration, weekly forecast and alert |
 | `src/dashboards/` | AI/BI dashboard definition |
 | `src/setup/` | Catalog, schemas and volume; the 221 cantons with their weather point (`cantones.csv`) |
 | `databricks.yml`, `resources/` | Declarative Automation Bundle: pipeline, job and dashboard |
-| `tests/` | pytest suites: no-leakage tests, publication dates, backtest and weekly bulletin |
+| `tests/` | pytest suites: no-leakage tests, publication dates, the PDF parser, backtest, weekly bulletin and table writes |
 | `scripts/` | Niño download and the generator of `cantones.csv` |
 | `.github/workflows/` | Weekly Niño download; CI that tests and deploys the bundle |
 
@@ -205,7 +206,7 @@ You need a Databricks workspace (Free Edition works), the Databricks CLI 1.22 or
 7. For CI, add the repository secrets `DATABRICKS_HOST` and `DATABRICKS_TOKEN`. To run the tests locally (Python 3.12 and Java 17):
 
    ```bash
-   pip install pyspark==4.0.1 pytest==8.4.2 scikit-learn==1.7.2 pandas==2.3.3 numpy==2.3.4 matplotlib==3.10.6
+   pip install pyspark==4.0.1 pytest==8.4.2 scikit-learn==1.7.2 pandas==2.3.3 numpy==2.3.4 matplotlib==3.10.6 pdfplumber==0.11.7
    pytest tests
    ```
 

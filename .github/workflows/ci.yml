@@ -21,10 +21,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Instala PySpark, scikit-learn y pytest
-        # Las versiones del entorno serverless 6 de Databricks. Sin pyarrow, a propósito: con pandas y pyarrow,
-        # assertDataFrameEqual importaria pyspark.pandas, que las pruebas no necesitan
-        run: pip install pyspark==4.0.1 pytest==8.4.2 scikit-learn==1.7.2 pandas==2.3.3 numpy==2.3.4 matplotlib==3.10.6
+      - name: Instala PySpark, scikit-learn, pdfplumber y pytest
+        # Las versiones del entorno serverless 6 de Databricks, y el pdfplumber del pipeline para las pruebas del
+        # parser. Sin pyarrow, a propósito: con pandas y pyarrow, assertDataFrameEqual importaria pyspark.pandas,
+        # que las pruebas no necesitan
+        run: pip install pyspark==4.0.1 pytest==8.4.2 scikit-learn==1.7.2 pandas==2.3.3 numpy==2.3.4 matplotlib==3.10.6 pdfplumber==0.11.7
       - name: Corre las pruebas
         run: pytest -v tests
 
