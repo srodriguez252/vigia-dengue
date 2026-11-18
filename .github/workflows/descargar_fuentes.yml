@@ -1,5 +1,5 @@
 # Cada semana: descarga las fuentes y las sube al Volume de landing.
-# En Databricks, el Job vigia-semanal vigila ese Volume y corre el ETL pipeline apenas llega el archivo.
+# En Databricks, el pipeline los lee con Auto Loader en la corrida del sábado del Job vigia-semanal.
 name: Descargar fuentes
 
 on:

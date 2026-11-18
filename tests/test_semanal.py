@@ -22,6 +22,13 @@ def test_pronostica_solo_lo_publicado_que_falta():
                                                                  pd.Timestamp("2023-05-28")]
 
 
+def test_la_emision_esperada_es_la_que_ya_debia_publicarse():
+    semanas = pd.DataFrame({"inicio_semana": pd.date_range("2026-10-04", periods=8, freq="7D")})
+    # La SE que empieza el domingo 1 de noviembre cierra el 7 y se publica el sábado 14
+    assert S.emision_esperada(semanas, "2026-11-14") == pd.Timestamp("2026-11-01")
+    assert S.emision_esperada(semanas, "2026-11-13") == pd.Timestamp("2026-10-25")   # el viernes toca la anterior
+
+
 def test_el_intervalo_cubre_lo_pedido():
     rng = np.random.default_rng(3)
     n = 4000

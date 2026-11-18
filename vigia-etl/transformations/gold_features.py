@@ -26,7 +26,10 @@ def features_provincia_semana():
         poblacion=spark.read.table("silver.poblacion_provincia_semana"),
         canal=spark.read.table("gold.canal_endemico"),
         casos_finales=spark.read.table("gold.dengue_semana"),
-        provincias=spark.read.table("gold.dim_geografia").select("dpa_provin", "provincia").distinct())
+        provincias=spark.read.table("gold.dim_geografia").select("dpa_provin", "provincia").distinct(),
+        # Hasta la emisión que toca publicar hoy, hora de Ecuador: si falla la descarga del clima, la fila existe
+        # igual, con sus features del clima vacías, y el boletín del sábado no se queda sin pronóstico
+        emitir_hasta=F.to_date(F.from_utc_timestamp(F.current_timestamp(), "America/Guayaquil")))
 
 
 @dp.materialized_view(

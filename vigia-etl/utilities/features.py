@@ -179,8 +179,12 @@ def normales_clima(clima):
                  F.avg("humedad").alias("humedad_normal"), F.countDistinct("anio_base").alias("anios_normal")))
 
 
-def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finales, provincias):
+def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finales, provincias, emitir_hasta=None):
     """Una fila por provincia y SE de emisión t: lo que se sabía al emitir y, aparte, los casos de t+1 a t+4
+
+    Sin `emitir_hasta` hay filas hasta la última semana con clima. Con una fecha (o una columna), hay una fila por
+    cada emisión ya publicada ese día, haya llegado o no el clima de su semana: es lo que usa el pipeline, para que
+    el boletín del sábado exista aunque falle una descarga. Las features del clima quedan vacías donde no hay dato
 
     casos_ventana guarda lo que la emisión sabía de sus últimas SEMANAS_ATRAS semanas, de la SE t hacia atrás, con
     nulo donde no había dato. De ahí salen los casos_ult (las semanas conocidas más recientes) y, en el modelo,
@@ -189,9 +193,12 @@ def features(gacetas_df, semanas_df, clima, nino, poblacion, canal, casos_finale
     emisiones = (semanas_df.select("anio_epi", "semana_epi", F.col("inicio_semana").alias("inicio_emision"),
                                    "fecha_emision")
                  .crossJoin(gacetas_df.agg(F.min("inicio_gaceta").alias("desde")))
-                 .crossJoin(clima.agg(F.max("inicio_semana").alias("hasta")))
-                 .where(F.col("inicio_emision").between(F.col("desde"), F.col("hasta")))
-                 .drop("desde", "hasta"))
+                 .where(F.col("inicio_emision") >= F.col("desde")).drop("desde"))
+    if emitir_hasta is None:
+        emisiones = (emisiones.crossJoin(clima.agg(F.max("inicio_semana").alias("hasta")))
+                     .where(F.col("inicio_emision") <= F.col("hasta")).drop("hasta"))
+    else:
+        emisiones = emisiones.where(F.col("fecha_emision") <= F.lit(emitir_hasta))
     base = emisiones.crossJoin(provincias.select("dpa_provin"))
     # Las 12 semanas de la ventana de cada emisión; k = 0 es la SE t
     ventana = (emisiones.select("inicio_emision")

@@ -36,6 +36,17 @@ def emisiones_pendientes(f, hechas, hoy, semanas=8):
     return sorted(e for e in publicadas.nlargest(semanas) if e not in hechas)
 
 
+def emision_esperada(semanas, hoy):
+    """La emisión que ya debe estar publicada el día `hoy`: la SE más reciente que cerró hace 7 días o más
+
+    El Job la compara con la última emisión de gold.pronosticos: si falta, falla en vez de mandar por correo el
+    boletín de la semana anterior
+    """
+    inicio = pd.to_datetime(semanas["inicio_semana"])
+    publicadas = inicio[inicio + pd.Timedelta(days=13) <= pd.Timestamp(hoy)]   # el sábado siguiente al cierre
+    return publicadas.max()
+
+
 def factores_intervalo(backtest, modelo, cobertura=COBERTURA):
     """Por horizonte, los extremos del error del backtest de `modelo`, medido como log((real + 1) / (pronóstico + 1))
 

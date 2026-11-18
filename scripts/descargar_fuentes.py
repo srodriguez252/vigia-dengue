@@ -5,7 +5,7 @@ Cada archivo queda en <destino>/<fuente>/fecha_descarga=AAAA-MM-DD/<archivo>, po
 
 Después, GitHub Actions (o a mano) sube la carpeta al Volume con:
     databricks fs cp -r landing dbfs:/Volumes/vigia/bronze/landing --overwrite
-Al llegar el archivo nuevo, el Job vigia-semanal de Databricks corre el ETL pipeline.
+El pipeline lo lee con Auto Loader en la corrida del sábado del Job vigia-semanal.
 
 Uso:
     python scripts/descargar_fuentes.py --fuente nino --destino landing

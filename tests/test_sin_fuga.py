@@ -237,6 +237,25 @@ def test_una_gaceta_publicada_tarde_no_cuenta_hasta_que_se_publica(resultado):
     assert (final.fecha_publicacion - final.fecha_corte).days == DIAS_TARDE
 
 
+def test_la_emision_existe_aunque_no_llegue_el_clima(datos, resultado):
+    semanas = ft.semanas(datos["calendario"])
+    se_40 = semanas.where("anio_epi = 2023 AND semana_epi = 40").first()
+    # Al clima le faltan las 5 últimas semanas, como si la descarga llevara un mes fallando
+    clima = datos["clima"].where(F.col("inicio_semana") <= F.lit(se_40.inicio_semana - dt.timedelta(days=35)))
+    finales, canal, _ = resultado
+    tabla = ft.features(ft.gacetas(datos["gacetas"], semanas), semanas, clima, datos["nino"], datos["poblacion"],
+                        canal, finales, datos["provincias"], emitir_hasta=se_40.fecha_emision)
+    fila = {r.semana_epi: r for r in
+            tabla.where("dpa_provin = '09' AND anio_epi = 2023 AND semana_epi >= 34").collect()}
+    # Hay una fila por cada emisión publicada hasta ese día, ni una más: la SE 40 se publica ese sábado
+    assert sorted(fila) == [34, 35, 36, 37, 38, 39, 40]
+    # Sin clima reciente, sus features quedan vacías; las de casos, no
+    assert fila[40].anomalia_lluvia_0_3 is None and fila[40].casos_lag0 == casos_reales("09", 2023, 40)
+    assert fila[35].anomalia_lluvia_0_3 is not None
+    # Sin emitir_hasta, las filas llegan solo hasta la última semana con clima
+    assert resultado[2].where("anio_epi = 2023").agg(F.max("semana_epi")).first()[0] == 52
+
+
 def test_el_canal_usa_anios_previos_sin_epidemias(resultado):
     canal = resultado[1]
     fila = canal.where("dpa_provin = '13' AND anio_epi = 2023 AND semana_epi = 20").first()
